@@ -326,7 +326,7 @@ const server = http.createServer((req, res) => {
       await downloadAttachments(message, id);
       if (!connectedChannels.has(message.channel_id)) {
         connectedChannels.add(message.channel_id);
-        console.log(`频道 ${String(message.channel_name || message.channel_id).slice(0,40)}：Discord 页面采集已连通，已收到消息。`);
+        console.log(`频道 ${String(message.channel_name || message.channel_id).slice(0,40)}：采集服务已收到扩展消息；页面在线状态以扩展巡检为准。`);
       }
       reply(200, {id});
     }
