@@ -13,7 +13,7 @@
 - `selftest/check_history.cjs`：只读统计频道历史消息是否已入库。
 - `selftest/send_history_minute.ps1`：按北京时间选定一分钟的风寻消息，仅向群二发送历史测试；须传入预期条数，已有发送记录时拒绝重发。
 
-颜驰、风寻、柳玉东的频道规则分别在 `../qq_channels/yanchi/`、`../qq_channels/fengxun/`、`../qq_channels/liuyudong/`。柳玉东模块处理无文字双图的展示占位词和群 1 的独立启用时间；图片按原顺序由通用发送器逐张发送。原 `scripts/` 下的同名命令仍是兼容入口；现有启动命令无需更改。
+颜驰、风寻、柳玉东的频道规则分别在 `../qq_channels/yanchi/`、`../qq_channels/fengxun/`、`../qq_channels/liuyudong/`。柳玉东模块处理无文字双图的展示占位词和群 1 的独立启用时间；图片按原顺序由通用发送器逐张发送。QQ 标题彩色标记只在 `core/channel_title_style.cjs` 叠加：柳玉东使用 🟢，利润医生使用 🔵；Discord 原始消息和归档频道名不变。原 `scripts/` 下的同名命令仍是兼容入口；现有启动命令无需更改。
 
 自动转发按目标群和频道记录已成功转发的最新 Discord 发布时间。页面刷新后读到更早的消息仍会入库，但不会倒退转发；网页延迟刷新时，晚于该频道转发进度的消息仍可按时间顺序补上。指定历史测试仍走独立补发命令。
 

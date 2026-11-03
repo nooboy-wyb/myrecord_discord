@@ -7,6 +7,7 @@ const yanchi = require('../../qq_channels/yanchi/index.cjs');
 const fengxun = require('../../qq_channels/fengxun/index.cjs');
 const liuyudong = require('../../qq_channels/liuyudong/index.cjs');
 const {createManualRecovery} = require('./manual_recovery.cjs');
+const {decorateChannelLabel} = require('./channel_title_style.cjs');
 const alerts = require('./alerts.cjs');
 const exchangeChannelId = '1265882617530814535';
 const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId]);
@@ -250,7 +251,7 @@ function messageHeading(message, context = {}) {
     : context.confirmedRetry ? '｜确认补发'
     : context.history || context.replayRequestId ? '｜历史补发' : '';
   const speaker = message.channel_id === '1265882617530814535' ? `｜${speakerName(message.author_display)}` : '';
-  return `【${label}${history}${speaker}】\n${sourceTimeLabel(message)}`;
+  return `【${decorateChannelLabel(message.channel_id,label)}${history}${speaker}】\n${sourceTimeLabel(message)}`;
 }
 function pendingMessages() {
   const rows = [];
