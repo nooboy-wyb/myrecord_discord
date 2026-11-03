@@ -1,0 +1,6 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Discord 采集设置</title>
+<style>body{font:16px system-ui;max-width:680px;margin:40px auto;line-height:1.6}input,textarea{box-sizing:border-box;width:100%;padding:8px}button{margin-top:14px;padding:8px 20px}</style>
+<h1>Discord 采集设置</h1><p>每行填写“名称 | 频道 URL”，例如“颜驰 | https://discord.com/channels/1222459489333018634/1254782508793593947”。也可只填 URL 或频道 ID。只有这些频道会被采集。</p>
+<textarea id="channels" rows="7" placeholder="颜驰 | https://discord.com/channels/1222459489333018634/1254782508793593947"></textarea>
+<p>本机服务令牌（运行服务后从 data/collector-token.txt 复制）：</p><input id="token" type="password" autocomplete="off">
+<button id="save">保存设置</button><p id="status"></p><script src="options.js"></script></html>
