@@ -418,6 +418,11 @@ function runPageStatus(tabId, work) {
 }
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'capture') enqueue(request.message);
+  if (request.type === 'imageNodeGap' && channelFromUrl(sender.tab?.url) === request.channelId
+    && /^\d{15,22}$/.test(request.sourceId || '')) {
+    queueDiagnostic('IMAGE_NODE_SKIPPED',{channel_id:request.channelId,
+      source_message_id:request.sourceId,detail:request.detail});
+  }
   if (request.type === 'pageStatus') {
     const tabId = sender.tab?.id;
     runPageStatus(tabId,async () => {

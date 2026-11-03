@@ -1,6 +1,7 @@
 (() => {
   let lastRoute = "";
   const seen = new Map();
+  const reportedImageGaps = new Set();
   let panel;
   let visibleMinutes = new Map();
   let lastLookupAt = 0;
@@ -426,6 +427,7 @@
     if (key !== lastRoute) {
       lastRoute = key;
       seen.clear();
+      reportedImageGaps.clear();
       loadForwarding();
       if (panel?.recovery && !panel.recovery.root.hidden) loadRecovery();
     }
@@ -443,6 +445,25 @@
     const nodes = new Set([...contentNodes].map(messageContainer));
     for (const node of [...nodesById, ...classNodes]) {
       if (!node.querySelector('[id^="message-content-"]')) nodes.add(node);
+    }
+    for (const node of nodesById) {
+      const candidateUrls = [...node.querySelectorAll('a[href],img[src],img[srcset]')]
+        .flatMap(item => [item.href,item.currentSrc,item.src]);
+      const acceptedUrls = candidateUrls.filter(value => {
+        const original = value && originalAttachmentUrl(value);
+        return original && /\.(?:png|jpe?g|webp|gif)$/i.test(new URL(original).pathname);
+      });
+      if (!acceptedUrls.length) continue;
+      const included = nodes.has(node);
+      const extracted = extract(node,context,channelLabels[context.channel_id]);
+      if (included && extracted?.attachments.length) continue;
+      const sourceId = node.id?.match(/(\d{15,22})$/)?.[1];
+      if (!sourceId || reportedImageGaps.has(sourceId)) continue;
+      reportedImageGaps.add(sourceId);
+      chrome.runtime.sendMessage({type:'imageNodeGap',channelId:context.channel_id,sourceId,
+        detail:{nodeId:node.id || '',included,contentId:node.querySelector('[id^="message-content-"]')?.id || '',
+          extractedId:extracted?.source_message_id || '',extractedAttachmentCount:extracted?.attachments.length ?? null,
+          acceptedUrlCount:acceptedUrls.length,imageCount:node.querySelectorAll('img').length}}).catch(() => {});
     }
     let extracted = 0;
     let latestSourceId = '';
