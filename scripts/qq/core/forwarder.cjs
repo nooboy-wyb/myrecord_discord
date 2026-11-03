@@ -587,9 +587,12 @@ function setOnline(value) {
   if (!online || wasOnline) return;
   const routes = additionalTargets();
   const control = primaryControl();
+  const groupNames = {'1132949059':'群 2','1130863739':'群 3'};
   for (const [channelId,label] of Object.entries(channelLabels())) {
     const groups = routes.filter(route => route.channel_ids.includes(channelId))
-      .map(route => `群 ${route.qq_group_number}`);
+      .map(route => groupNames[route.qq_group_number]
+        ? `${groupNames[route.qq_group_number]}（${route.qq_group_number}）`
+        : `QQ群 ${route.qq_group_number}`);
     if (!additionalChannelIds.has(channelId) && control.primary_enabled !== false) groups.push('群 1');
     const paused = control.paused_channels?.[channelId] === true;
     const status = paused ? '转发已暂停' : groups.length ? '已启动自动转发' : '未启用自动转发';
