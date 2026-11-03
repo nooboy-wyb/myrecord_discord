@@ -581,7 +581,21 @@ function start() {
   setInterval(tick, 5000);
   tick();
 }
-function setOnline(value) { online = value; }
+function setOnline(value) {
+  const wasOnline = online;
+  online = value;
+  if (!online || wasOnline) return;
+  const routes = additionalTargets();
+  const control = primaryControl();
+  for (const [channelId,label] of Object.entries(channelLabels())) {
+    const groups = routes.filter(route => route.channel_ids.includes(channelId))
+      .map(route => `群 ${route.qq_group_number}`);
+    if (!additionalChannelIds.has(channelId) && control.primary_enabled !== false) groups.push('群 1');
+    const paused = control.paused_channels?.[channelId] === true;
+    const status = paused ? '转发已暂停' : groups.length ? '已启动自动转发' : '未启用自动转发';
+    console.log(`频道 ${label}：${status}${groups.length ? `（${groups.join('、')}）` : ''}；Discord 页面待扫描确认。`);
+  }
+}
 module.exports = {start,setOnline,splitText,sourceTimeLabel,messageHeading,fengxunFingerprint:fengxun.fingerprint,
   routeAcceptsMessage,primaryAcceptsMessage,isAfterLiveWatermark,buildParts,processMessage,
   recoveryCandidates:manualRecovery.recoveryCandidates,queueRecovery:manualRecovery.queueRecovery,

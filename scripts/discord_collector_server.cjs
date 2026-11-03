@@ -12,6 +12,7 @@ const tokenPath = path.join(root, 'collector-token.txt');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, crypto.randomBytes(32).toString('base64url'));
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
 const imageHosts = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+const connectedChannels = new Set();
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 }
@@ -323,6 +324,10 @@ const server = http.createServer((req, res) => {
       const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const id = save(message);
       await downloadAttachments(message, id);
+      if (!connectedChannels.has(message.channel_id)) {
+        connectedChannels.add(message.channel_id);
+        console.log(`频道 ${String(message.channel_name || message.channel_id).slice(0,40)}：Discord 页面采集已连通，已收到消息。`);
+      }
       reply(200, {id});
     }
     catch (error) { reply(400, {error:String(error.message)}); }
