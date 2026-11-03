@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {DatabaseSync} = require('node:sqlite');
 const {saveDiagnostic,recoveryAlertAlreadyHandled} = require('./collector_diagnostics.cjs');
+const {createPageStatusReporter} = require('./collector_page_status.cjs');
 
 const root = path.resolve(__dirname, '..', 'data');
 fs.mkdirSync(root, {recursive: true});
@@ -13,6 +14,11 @@ if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, crypto.randomBytes(32
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
 const imageHosts = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const connectedChannels = new Set();
+const labelFile = path.join(root,'qq-channel-labels.json');
+const pageStatusReporter = createPageStatusReporter({
+  labels:fs.existsSync(labelFile) ? JSON.parse(fs.readFileSync(labelFile,'utf8')) : {},
+  saveDiagnostic
+});
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 }
@@ -171,6 +177,20 @@ let forwarder = null;
 const recoveryNoticeAt = new Map();
 const server = http.createServer((req, res) => {
   const reply = (status, value) => {res.writeHead(status, {'Content-Type':'application/json'}); res.end(JSON.stringify(value));};
+  if (req.method === 'POST' && req.url === '/v1/collector/page-status') {
+    if (!authorized(req)) return reply(401,{error:'unauthorized'});
+    (async () => {
+      let bytes = 0;
+      const chunks = [];
+      for await (const chunk of req) {
+        bytes += chunk.length;
+        if (bytes > 8192) throw Error('page status request too large');
+        chunks.push(chunk);
+      }
+      return reply(200,pageStatusReporter.report(JSON.parse(Buffer.concat(chunks).toString('utf8'))));
+    })().catch(error => reply(400,{error:error.message}));
+    return;
+  }
   if (req.method === 'POST' && req.url === '/v1/collector/diagnostic') {
     if (!authorized(req)) return reply(401,{error:'unauthorized'});
     (async () => {
@@ -348,6 +368,7 @@ async function backfillToday() {
 }
 if (require.main === module) server.listen(8765, '127.0.0.1', () => {
   console.log(`Discord collector server v0.2.5 listening on http://127.0.0.1:8765 ; token: ${tokenPath}`);
+  setTimeout(() => pageStatusReporter.warnIfNoReport(),90_000).unref();
   backfillToday().catch(error => console.error('Backfill:', error.message));
   if (process.env.QQ_FORWARD_ENABLED === '1') {
     try {

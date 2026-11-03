@@ -8,11 +8,12 @@ const now = Date.now();
 let clock = now;
 class FakeDate extends Date { static now() { return clock; } }
 const data = {token:'test',allowedChannels:[channelId],lastRefreshByTab:{1:now},
-  'health:1':{lastScanAt:now-5*60_000,lastGoodAt:now-5*60_000,status:'healthy'}};
+  'health:1':{lastScanAt:now-30_000,lastGoodAt:now-30_000,status:'healthy'}};
 const tab = {id:1,url:`https://discord.com/channels/1222459489333018634/${channelId}`,
   windowId:1,active:false,discarded:false};
 let reloads = 0;
 const polls = [];
+const reports = [];
 let windowFocused = true;
 const noop = () => {};
 const local = {
@@ -23,13 +24,14 @@ const local = {
   async set(values) { Object.assign(data,structuredClone(values)); }
 };
 const chrome = {storage:{local},tabs:{query:async()=>[tab,{id:2,url:'https://discord.com/channels/1/999999999999999999',active:false}],
-  sendMessage:async(id,message)=>{polls.push({id,message});},reload:async()=>{reloads++;},
+  sendMessage:async(id,message)=>{polls.push({id,message});return {allowed:true,extracted:1};},reload:async()=>{reloads++;},
   onUpdated:{addListener:noop}},alarms:{get:async()=>({}),create:noop,onAlarm:{addListener:noop}},
   windows:{getAll:async()=>[{id:1,focused:windowFocused}]},
   runtime:{onMessage:{addListener:noop},onStartup:{addListener:noop},onInstalled:{addListener:noop}},
   action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}}};
-const context = vm.createContext({chrome,console,crypto:webcrypto,setInterval:noop,Date:FakeDate,URL,URLSearchParams,BigInt,Buffer,
-  fetch:async()=>({ok:true})});
+const context = vm.createContext({chrome,console,crypto:webcrypto,setInterval:noop,setTimeout,clearTimeout,
+  AbortSignal,Date:FakeDate,URL,URLSearchParams,BigInt,Buffer,
+  fetch:async(_url,options)=>{reports.push(JSON.parse(options.body));return {ok:true};}});
 vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/background.js'),'utf8'),context);
 
 (async()=>{
@@ -39,15 +41,17 @@ vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/backg
   assert.equal(polls[0].id,tab.id);
   assert.equal(polls[0].message.type,'pollScan');
   assert.equal(polls[0].message.channelId,channelId);
+  assert.deepEqual(reports[0],{enabled:[channelId],open:[channelId],scanning:[channelId]});
   assert.equal(reloads,0,'minute poll must not reload the page');
   const patrol = vm.runInContext('refreshMonitoredTabs',context);
   await patrol();
-  assert.equal(reloads,0,'inactive background tab must wait for its periodic refresh');
+  assert.equal(reloads,0,'healthy inactive tab must wait for its periodic refresh');
   tab.active = true;
   windowFocused = false;
   await patrol();
   assert.equal(reloads,0,'selected tab in an unfocused Edge window must not trigger early recovery');
   windowFocused = true;
+  data['health:1'] = {lastScanAt:clock-5*60_000,lastGoodAt:clock-5*60_000,status:'healthy'};
   await patrol();
   assert.equal(reloads,1,'stalled active tab should recover immediately');
   data.refreshTestMode = {enabled:true,nextAt:0,runId:123,seenTabIds:[]};
@@ -62,16 +66,18 @@ vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/backg
   data.lastRefreshByTab = {1:clock};
   for (const [index,minutes] of [30,30,30,30,30,30].entries()) {
     clock += (minutes - 1) * 60_000;
+    data['health:1'].lastScanAt = clock;
+    data['health:1'].lastGoodAt = clock;
     await patrol();
     assert.equal(reloads,2 + index,`periodic refresh ${index + 1} must wait ${minutes} minutes`);
     clock += 60_000;
-    if (index === 5) tab.discarded = true;
+    data['health:1'].lastScanAt = clock;
+    data['health:1'].lastGoodAt = clock;
     await patrol();
     assert.equal(reloads,3 + index,`periodic refresh ${index + 1} is due`);
     assert.equal(data.refreshHistory[0].reason,'定时巡检');
     assert.equal(data['health:1'].incidentStartedAt,0,'periodic refresh must not start an incident');
   }
-  tab.discarded = false;
   tab.active = true;
   clock += 60_000;
   await patrol();
