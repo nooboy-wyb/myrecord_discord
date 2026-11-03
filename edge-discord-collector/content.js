@@ -374,15 +374,20 @@
   function extract(node, context, channelLabel) {
     const content = node.matches('[id^="message-content-"]') ? node
       : node.querySelector('[id^="message-content-"]') || node.querySelector('[class*="messageContent"]');
-    const id = content?.id?.match(/^message-content-(\d+)$/)?.[1]
-      || node.id?.match(/^chat-messages-(?:\d+-)?(\d+)$/)?.[1]
+    const nodeId = node.id?.match(/^chat-messages-(?:\d+-)?(\d+)$/)?.[1];
+    const contentId = content?.id?.match(/^message-content-(\d+)$/)?.[1];
+    const id = nodeId || contentId
       || node.id?.match(/^message-(\d+)$/)?.[1]
       || node.dataset.messageId || null;
     if (!id) return null;
-    const body = content?.innerText ?? "";
+    const inheritedContent = nodeId && contentId && nodeId !== contentId;
+    const body = inheritedContent ? '' : content?.innerText ?? '';
     const timeEl = node.querySelector('time[datetime]');
-    const sourceTimestamp = timeEl?.getAttribute('datetime') || null;
-    const displayedTime = timeEl?.textContent?.trim() || timeEl?.getAttribute('aria-label') || "";
+    const sourceTimestamp = inheritedContent
+      ? new Date(Number((BigInt(id) >> 22n) + 1420070400000n)).toISOString()
+      : timeEl?.getAttribute('datetime') || null;
+    const displayedTime = inheritedContent ? ''
+      : timeEl?.textContent?.trim() || timeEl?.getAttribute('aria-label') || '';
     const directAuthor = text(node, ['[id^="message-username-"]', '[class*="username"]']);
     const inherited = directAuthor ? '' : inheritedAuthor(node, sourceTimestamp);
     const author = directAuthor || inherited;
@@ -419,6 +424,17 @@
       capture_method: 'dom'
     };
   }
+  function messageNodes() {
+    const nodesById = document.querySelectorAll('[id^="chat-messages-"]');
+    const contentNodes = document.querySelectorAll('[id^="message-content-"]');
+    const classNodes = document.querySelectorAll('li[class*="messageListItem"], [data-message-id]');
+    const nodes = new Set([...contentNodes].map(messageContainer));
+    for (const node of nodesById) nodes.add(node);
+    for (const node of classNodes) {
+      if (!node.querySelector('[id^="message-content-"]')) nodes.add(node);
+    }
+    return {nodesById, contentNodes, nodes};
+  }
   async function scan(forceResubmit = false) {
     const context = route();
     if (!context) return;
@@ -439,13 +455,7 @@
       chrome.runtime.sendMessage({type: 'pageStatus', channel_id: context.channel_id, allowed, count: 0, extracted: 0, at: Date.now()}).catch(() => {});
       return {allowed:false, extracted:0};
     }
-    const nodesById = document.querySelectorAll('[id^="chat-messages-"]');
-    const contentNodes = document.querySelectorAll('[id^="message-content-"]');
-    const classNodes = document.querySelectorAll('li[class*="messageListItem"], [data-message-id]');
-    const nodes = new Set([...contentNodes].map(messageContainer));
-    for (const node of [...nodesById, ...classNodes]) {
-      if (!node.querySelector('[id^="message-content-"]')) nodes.add(node);
-    }
+    const {nodesById, contentNodes, nodes} = messageNodes();
     for (const node of nodesById) {
       const candidateUrls = [...node.querySelectorAll('a[href],img[src],img[srcset]')]
         .flatMap(item => [item.href,item.currentSrc,item.src]);
