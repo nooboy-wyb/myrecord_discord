@@ -18,8 +18,9 @@ const setOnline = vm.runInNewContext(`let online=false;\n${source.slice(start,en
   console:{log:value=>logs.push(value)}
 });
 setOnline(true);
-assert(logs.some(line=>line.includes('交流频道：已启动自动转发（群 3（1130863739））')));
-assert(logs.some(line=>line.includes('风寻：已启动自动转发（群 2（1132949059））')));
+assert(logs.some(line=>line.includes('交流频道：已启动自动转发（群 3）')));
+assert(logs.some(line=>line.includes('风寻：已启动自动转发（群 2）')));
+assert(logs.every(line=>!line.includes('1130863739')&&!line.includes('1132949059')));
 assert(logs.some(line=>line.includes('利润医生：已启动自动转发（群 1）')));
 assert(logs.every(line=>line.includes('Discord 页面待扫描确认')));
 setOnline(true);

@@ -49,6 +49,8 @@ state.exec(`CREATE TABLE IF NOT EXISTS replay_items (
   request_id INTEGER NOT NULL, source_message_id TEXT NOT NULL, content_sha256 TEXT NOT NULL,
   channel_id TEXT NOT NULL, source_timestamp TEXT, status TEXT NOT NULL,
   PRIMARY KEY (request_id,source_message_id));`);
+state.exec(`CREATE TABLE IF NOT EXISTS startup_unknown_alerts (
+  alert_key TEXT PRIMARY KEY, accepted_at TEXT NOT NULL);`);
 for (const [name, type] of [['group_openid','TEXT'],['mode','TEXT']]) {
   if (!state.prepare('PRAGMA table_info(replay_requests)').all().some(column => column.name === name)) {
     state.exec(`ALTER TABLE replay_requests ADD COLUMN ${name} ${type}`);
@@ -574,9 +576,16 @@ function start() {
     ORDER BY a.attempted_at DESC LIMIT 10`).all();
   for (const item of interrupted) {
     const detail = `Discord ${item.source_message_id}（${channelLabels()[item.channel_id] || item.channel_id}，原消息时间 ${sourceTimeLabel(item)}，第 ${item.part_index + 1} 段）`;
-    console.warn(`启动检查：${detail} 发送结果未知；需核对 QQ 群后定向补发。`);
-    alerts.notify(`unresolved:${item.group_openid}:${item.source_message_id}:${item.part_index}`,
-      `【QQ 转发告警】启动检查发现 ${detail} 发送结果未知。请先核对 QQ 群是否收到，勿直接重发。`);
+    const alertKey = `unresolved:${item.group_openid}:${item.source_message_id}:${item.part_index}`;
+    const alreadyAlerted = state.prepare('SELECT 1 FROM startup_unknown_alerts WHERE alert_key=?').get(alertKey);
+    console.warn(`启动检查：${detail} 发送结果未知；需核对 QQ 群后定向补发。${alreadyAlerted ? ' 此前已私聊提醒，本次不重复发送。' : ''}`);
+    if (alreadyAlerted) continue;
+    alerts.notify(alertKey,
+      `【QQ 转发告警】启动检查发现 ${detail} 发送结果未知。请先核对 QQ 群是否收到，勿直接重发。`)
+      .then(sent => {
+        if (sent) state.prepare('INSERT OR IGNORE INTO startup_unknown_alerts(alert_key,accepted_at) VALUES (?,?)')
+          .run(alertKey,new Date().toISOString());
+      }).catch(error => console.error(`启动告警状态保存失败：${error.message}`));
   }
   setInterval(tick, 5000);
   tick();
@@ -591,7 +600,7 @@ function setOnline(value) {
   for (const [channelId,label] of Object.entries(channelLabels())) {
     const groups = routes.filter(route => route.channel_ids.includes(channelId))
       .map(route => groupNames[route.qq_group_number]
-        ? `${groupNames[route.qq_group_number]}（${route.qq_group_number}）`
+        ? groupNames[route.qq_group_number]
         : `QQ群 ${route.qq_group_number}`);
     if (!additionalChannelIds.has(channelId) && control.primary_enabled !== false) groups.push('群 1');
     const paused = control.paused_channels?.[channelId] === true;
