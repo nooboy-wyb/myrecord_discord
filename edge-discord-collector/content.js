@@ -435,6 +435,33 @@
     }
     return {nodesById, contentNodes, nodes};
   }
+  function combineExtracted(messages) {
+    const byId = new Map();
+    for (const message of messages) {
+      const prior = byId.get(message.source_message_id);
+      if (!prior) {
+        byId.set(message.source_message_id, message);
+        continue;
+      }
+      const attachments = new Map([...prior.attachments, ...message.attachments]
+        .map(item => [item.source_url, item]));
+      const body = prior.body_raw || message.body_raw;
+      const merged = {
+        ...prior,
+        body_raw: body,
+        attachments: [...attachments.values()],
+        source_timestamp: prior.source_timestamp || message.source_timestamp,
+        displayed_time: prior.displayed_time || message.displayed_time,
+        author_display: prior.author_display || message.author_display,
+        author_source: prior.author_display ? prior.author_source : message.author_source
+      };
+      merged.body_kind = body.trim()
+        ? attachments.size ? 'text_and_image' : 'text_only'
+        : attachments.size === 1 ? 'single_image' : attachments.size > 1 ? 'images_only' : 'missing_image';
+      byId.set(message.source_message_id, merged);
+    }
+    return [...byId.values()];
+  }
   async function scan(forceResubmit = false) {
     const context = route();
     if (!context) return;
@@ -478,9 +505,9 @@
     let extracted = 0;
     let latestSourceId = '';
     visibleMinutes = new Map();
-    for (const node of nodes) {
-      const message = extract(node, context, channelLabels[context.channel_id]);
-      if (!message) continue;
+    const messages = combineExtracted([...nodes]
+      .map(node => extract(node, context, channelLabels[context.channel_id])).filter(Boolean));
+    for (const message of messages) {
       extracted++;
       if (/^\d+$/.test(message.source_message_id)
         && (!latestSourceId || BigInt(message.source_message_id) > BigInt(latestSourceId))) {

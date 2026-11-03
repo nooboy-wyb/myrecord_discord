@@ -46,11 +46,25 @@ const quotedDocument = {
         ? [withPreviousContent] : []
 };
 const chooserStart = extractorEnd;
-const chooserEnd = source.indexOf('  async function scan(',chooserStart);
+const chooserEnd = source.indexOf('  function combineExtracted(',chooserStart);
 assert(chooserStart > extractorStart && chooserEnd > chooserStart);
 const choose = vm.runInNewContext(`${source.slice(containerStart,extractorStart)}\n${source.slice(chooserStart,chooserEnd)}\nmessageNodes`,
   {document:quotedDocument});
 const {nodes} = choose();
 assert(nodes.has(withPreviousContent),'a message with quoted text must still be scanned');
 assert(nodes.has(previousNode),'the original text message remains scannable');
+const combinerStart = chooserEnd;
+const combinerEnd = source.indexOf('  async function scan(',combinerStart);
+assert(combinerStart > chooserStart && combinerEnd > combinerStart);
+const combine = vm.runInNewContext(`${source.slice(combinerStart,combinerEnd)}\ncombineExtracted`,{});
+const forwardedText = {...recovered,body_raw:'SINJ long limit\nEntry & stops in the chart',
+  body_kind:'text_only',attachments:[],source_timestamp:null,displayed_time:''};
+const combined = combine([forwardedText,recovered]);
+assert.equal(combined.length,1,'one Discord ID should be captured once');
+assert.equal(combined[0].body_raw,forwardedText.body_raw);
+assert.equal(combined[0].body_kind,'text_and_image');
+assert.equal(combined[0].attachments.length,1);
+assert.equal(combined[0].source_timestamp,recovered.source_timestamp);
+assert.equal(combine([forwardedText,{...recovered,source_message_id:'1567019164546244640'}]).length,2,
+  'a quoted message with a different ID must remain separate');
 console.log('Image-only Discord messages with channel and message IDs are captured.');

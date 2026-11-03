@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Discord 频道采集（本地）",
-  "version": "0.2.51",
+  "version": "0.2.52",
   "description": "采集指定 Discord 网页频道中已加载的消息，保存到本机。",
   "permissions": ["storage", "alarms"],
   "host_permissions": ["https://discord.com/*", "http://127.0.0.1:8765/*"],
