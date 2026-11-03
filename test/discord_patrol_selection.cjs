@@ -73,23 +73,23 @@ vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/backg
   }
   tab.discarded = false;
   tab.active = true;
-  clock += 2 * 60_000;
+  clock += 60_000;
   await patrol();
   assert.equal(reloads,9,'active stalled page should recover without waiting for the 30-minute schedule');
   assert.ok(data['health:1'].incidentStartedAt);
-  clock += 60_000;
+  clock += 30_000;
   await patrol();
-  assert.equal(reloads,9,'failed recovery should wait for its fixed two-minute retry');
-  clock += 60_000;
+  assert.equal(reloads,9,'failed recovery should wait for its fixed one-minute retry');
+  clock += 30_000;
   await patrol();
-  assert.equal(reloads,10,'failed recovery retries after two minutes');
-  assert.equal(data['health:1'].nextAttemptAt,clock + 2 * 60_000);
-  data.recoveryRetryVersion = 1;
+  assert.equal(reloads,10,'failed recovery retries after one minute');
+  assert.equal(data['health:1'].nextAttemptAt,clock + 60_000);
+  data.recoveryRetryVersion = 2;
   data['health:1'] = {...data['health:1'],status:'recovering',
     incidentStartedAt:clock - 3 * 60_000,requestedAt:clock - 3 * 60_000,
     nextAttemptAt:clock + 7 * 60_000};
   await patrol();
   assert.equal(reloads,11,'old ten-minute recovery wait should shrink on upgrade');
-  assert.equal(data.recoveryRetryVersion,2);
+  assert.equal(data.recoveryRetryVersion,3);
   console.log('Patrol keeps active recovery separate from the fixed 30-minute periodic schedule.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

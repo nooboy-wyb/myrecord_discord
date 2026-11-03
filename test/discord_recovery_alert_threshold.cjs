@@ -9,7 +9,7 @@ let clockMs = Date.now();
 class ClockDate extends Date { static now() { return clockMs; } }
 const state = new Map([
   ['token','test-token'],['allowedChannels',[channelId]],
-  ['periodicScheduleVersion',1],['recoveryRetryVersion',2],
+  ['periodicScheduleVersion',1],['recoveryRetryVersion',3],
   ['lastRefreshByTab',{[tabId]:clockMs - 3 * 60_000}],
   [`health:${tabId}`,{channelId,status:'recovering',attempt:1,
     incidentStartedAt:clockMs - 3 * 60_000,requestedAt:clockMs - 2 * 60_000 - 1,
@@ -60,7 +60,7 @@ vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/backg
     outcomeNotifiedAt:0});
   await vm.runInContext('refreshMonitoredTabs()',context);
   assert.equal(alerts.length,0);
-  clockMs += 2 * 60_000 + 1;
+  clockMs += 60_000 + 1;
   await vm.runInContext('refreshMonitoredTabs()',context);
   assert.equal(state.get(`health:${tabId}`).failedAttempts,2);
   assert.equal(alerts.length,1);

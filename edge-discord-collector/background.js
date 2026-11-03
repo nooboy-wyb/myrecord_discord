@@ -183,9 +183,9 @@ async function flushRecoveryAlerts() {
     }
   } finally { alertSending = false; }
 }
-const staleAfterMs = 2 * 60_000;
+const staleAfterMs = 60_000;
 const periodicRefreshIntervalMs = 30 * 60_000;
-const recoveryRetryMs = 2 * 60_000;
+const recoveryRetryMs = 60_000;
 const channelFromUrl = url => url?.match(/^https:\/\/discord\.com\/channels\/(?:\d+|@me)\/(\d+)(?:[/?#]|$)/)?.[1];
 const healthKey = tabId => `health:${tabId}`;
 const diagnosticHealth = (tab,channelId,health,extra = {}) => ({
@@ -232,8 +232,8 @@ async function refreshMonitoredTabs(force = false, test = false) {
       }
       const healthRecords = await chrome.storage.local.get(tabs.map(tab => healthKey(tab.id)));
       const {recoveryRetryVersion = 0} = await chrome.storage.local.get('recoveryRetryVersion');
-      if (recoveryRetryVersion !== 2) {
-        const revised = {recoveryRetryVersion:2};
+      if (recoveryRetryVersion !== 3) {
+        const revised = {recoveryRetryVersion:3};
         for (const tab of tabs) {
           const key = healthKey(tab.id);
           const health = healthRecords[key];
@@ -268,7 +268,7 @@ async function refreshMonitoredTabs(force = false, test = false) {
           Object.assign(health,failure);
           await chrome.storage.local.set({[healthKey(tab.id)]:failure});
           await queueDiagnostic('RECOVERY_ATTEMPT_TIMEOUT',diagnosticHealth(tab,channelId,failure,{
-            error:'本次重载后两分钟仍未重新识别到消息',detail:{failed_attempts:failedAttempts}}));
+            error:'本次重载后一分钟仍未重新识别到消息',detail:{failed_attempts:failedAttempts}}));
           if (shouldAlert) await queueRecoveryAlert({channelId,requestedAt:failure.incidentStartedAt,
             attempt:failure.attempt,status:'timeout'});
         }
