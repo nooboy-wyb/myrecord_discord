@@ -224,6 +224,13 @@ function advanceLiveWatermark(groupOpenid, message) {
     ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(key,value);
 }
 function liveMessageEligible(groupOpenid, message, startupFloor) {
+  const taskKey = crypto.createHash('sha256').update(JSON.stringify([
+    groupOpenid,message.channel_id,message.source_message_id,message.content_sha256
+  ])).digest('hex');
+  if (state.prepare(`SELECT 1 FROM forward_attempts WHERE task_key=?
+    AND (status IN ('preparing','rate_limited') OR (status='failed_preflight'
+      AND error NOT LIKE 'Original image format requires separate validation%'
+      AND error NOT LIKE 'Original image exceeds 5 MB%')) LIMIT 1`).get(taskKey)) return true;
   const watermark = liveWatermark(groupOpenid,message.channel_id);
   if ((watermark || sourceTime(message) >= startupFloor)
     && isAfterLiveWatermark(message,watermark)) return true;
@@ -368,16 +375,17 @@ async function processMessage(message, context = {}) {
       groupCooldownUntil.set(groupOpenid,Date.parse(previous.attempted_at) + rateLimitCooldownMs);
       return 'deferred';
     }
-    if (previous && !['failed_preflight','rate_limited'].includes(previous.status)) {
+    if (previous && !['failed_preflight','rate_limited','preparing'].includes(previous.status)) {
       if (!isolateUnknown) pauseGroup(groupOpenid);
       console.error(isolateUnknown
         ? `Discord ${message.source_message_id} 第 ${index + 1} 段结果未知，已隔离该条，继续处理后续消息；请人工核查。`
         : `QQ 目标群 ${groupOpenid === target.group_openid ? '主群' : '附加群'} 转发已暂停：第 ${index + 1} 段存在未确认记录，请人工核查后处理。`);
       return 'unknown';
     }
-    // Mark before network I/O, so an interrupted request is never automatically sent twice.
-    record(key,index,part.type,message,'unknown',{},context);
-    let qqRequestStarted = false;
+    // Only /messages can create a group message; uploading with srv_send_msg:false is safe to repeat.
+    record(key,index,part.type,message,part.type === 'image' ? 'preparing' : 'unknown',{},context);
+    let qqMessageStarted = false;
+    let imageUploadStarted = false;
     try {
       let payload;
       if (part.type === 'text') payload = {msg_type: 0, content: part.content};
@@ -389,14 +397,18 @@ async function processMessage(message, context = {}) {
         const bytes = fs.readFileSync(attachment.local_path);
         if (!/\.(png|jpe?g)$/i.test(attachment.local_path)) throw Error('Original image format requires separate validation');
         if (bytes.length > 5_000_000) throw Error('Original image exceeds 5 MB direct upload limit; chunk upload is required');
-        qqRequestStarted = true;
+        imageUploadStarted = true;
         const uploaded = await post('files', {file_type: 1,file_name: path.basename(attachment.local_path),
           file_data: bytes.toString('base64'),srv_send_msg: false},groupOpenid);
         if (!uploaded.file_info) throw Error('QQ image upload returned no file_info');
         payload = {msg_type: 7,content:part.content || ' ',media: {file_info: uploaded.file_info}};
       }
       let sent;
-      try { qqRequestStarted = true; sent = await post('messages', payload, groupOpenid); }
+      try {
+        if (part.type === 'image') record(key,index,part.type,message,'unknown',{},context);
+        qqMessageStarted = true;
+        sent = await post('messages', payload, groupOpenid);
+      }
       catch (error) {
         const canSplit = message.channel_id === liuyudong.channelId && index === 0 && part.type === 'image'
           && part.content?.trim() && error.httpStatus === 400
@@ -413,30 +425,32 @@ async function processMessage(message, context = {}) {
       record(key,index,part.type,message,'accepted',{platformId: sent.id},context);
       console.log(`QQ 接受转发：Discord ${message.source_message_id}，目标群 ${groupOpenid === target.group_openid ? '主群' : '附加群'}，第 ${index + 1}/${parts.length} 段。`);
     } catch (error) {
-      const preflight = !qqRequestStarted;
+      // /files uses srv_send_msg:false, so only /messages can create a group message.
+      const preflight = !qqMessageStarted;
       const rateLimited = error.platformCode === '40034100' && error.httpStatus === 400;
-      record(key,index,part.type,message,preflight ? 'failed_preflight' : rateLimited ? 'rate_limited' : 'unknown',
-        {httpStatus:error.httpStatus,platformCode:error.platformCode,error:error.message},context);
-      if (preflight) {
-        console.warn(`QQ 图片发送前检查失败，Discord ${message.source_message_id} 第 ${index + 1} 段稍后重试：${error.message}`);
-        return 'deferred';
-      }
+      const errorDetail = [error.message,error.cause?.code,error.cause?.message].filter(Boolean).join(' | ');
+      record(key,index,part.type,message,rateLimited ? 'rate_limited' : preflight ? 'failed_preflight' : 'unknown',
+        {httpStatus:error.httpStatus,platformCode:error.platformCode,error:errorDetail},context);
       if (rateLimited) {
         groupCooldownUntil.set(groupOpenid,Date.now() + rateLimitCooldownMs);
         try {
           saveDiagnostic({event_id:crypto.randomUUID(),at:Date.now(),code:'QQ_RATE_LIMITED',
-            channel_id:message.channel_id,source_message_id:message.source_message_id,error:error.message,
+            channel_id:message.channel_id,source_message_id:message.source_message_id,error:errorDetail,
             detail:{part_index:index,retry_after_ms:rateLimitCooldownMs}});
         } catch (logError) { console.warn('QQ rate limit diagnostic:',logError.message); }
         console.warn(`QQ 限频，Discord ${message.source_message_id} 第 ${index + 1} 段两分钟后重试。`);
         return 'deferred';
       }
+      if (preflight) {
+        console.warn(`QQ 图片发送前${imageUploadStarted ? '上传' : '检查'}失败，Discord ${message.source_message_id} 第 ${index + 1} 段稍后重试：${errorDetail}`);
+        return 'deferred';
+      }
       if (!isolateUnknown) pauseGroup(groupOpenid);
       console.error(isolateUnknown
-        ? `Discord ${message.source_message_id} 第 ${index + 1} 段发送结果未知，已隔离该条，继续处理后续消息：${error.message}`
-        : `QQ 目标群 ${groupOpenid === target.group_openid ? '主群' : '附加群'} 转发暂停：Discord ${message.source_message_id}，第 ${index + 1} 段：${error.message}`);
+        ? `Discord ${message.source_message_id} 第 ${index + 1} 段发送结果未知，已隔离该条，继续处理后续消息：${errorDetail}`
+        : `QQ 目标群 ${groupOpenid === target.group_openid ? '主群' : '附加群'} 转发暂停：Discord ${message.source_message_id}，第 ${index + 1} 段：${errorDetail}`);
       alerts.notify(`send:${groupOpenid}:${message.source_message_id}:${index}`,
-        `【QQ 转发告警】${groupOpenid === target.group_openid ? '群 1' : '附加群'}发送结果未知。Discord 消息 ${message.source_message_id}，原消息时间 ${sourceTimeLabel(message)}，第 ${index + 1} 段；${error.message}。${isolateUnknown ? '该条已隔离，其他消息继续。' : '该群已暂停转发。'}请先核对群内是否收到，勿直接重发。`);
+        `【QQ 转发告警】${groupOpenid === target.group_openid ? '群 1' : '附加群'}发送结果未知。Discord 消息 ${message.source_message_id}，原消息时间 ${sourceTimeLabel(message)}，第 ${index + 1} 段；${errorDetail}。${isolateUnknown ? '该条已隔离，其他消息继续。' : '该群已暂停转发。'}请先核对群内是否收到，勿直接重发。`);
       return 'unknown';
     }
   }
