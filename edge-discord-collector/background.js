@@ -126,10 +126,11 @@ async function queueDiagnostic(code, fields = {}) {
 async function flushDiagnostics() {
   if (diagnosticSending) return;
   diagnosticSending = true;
+  let retrySoon = false;
   try {
     const {token = '', diagnosticQueue = []} = await chrome.storage.local.get(['token','diagnosticQueue']);
     if (!token) return;
-    for (const event of diagnosticQueue) {
+    for (const event of [...diagnosticQueue].sort((a,b) => b.at - a.at).slice(0,25)) {
       try {
         const response = await fetch('http://127.0.0.1:8765/v1/collector/diagnostic',{
           method:'POST',headers:{'Content-Type':'application/json','X-Collector-Token':token},
@@ -146,7 +147,13 @@ async function flushDiagnostics() {
         break;
       }
     }
-  } finally { diagnosticSending = false; }
+    const remaining = (await chrome.storage.local.get('diagnosticQueue')).diagnosticQueue || [];
+    retrySoon = remaining.length > 0 && !((await chrome.storage.local.get('lastDiagnosticError')).lastDiagnosticError);
+  } finally {
+    diagnosticSending = false;
+    if (retrySoon) setTimeout(() => flushDiagnostics().catch(error =>
+      console.warn('Diagnostic batch:',error)),1000);
+  }
 }
 async function queueRecoveryAlert(event) {
   const {recoveryAlertQueue = []} = await chrome.storage.local.get('recoveryAlertQueue');

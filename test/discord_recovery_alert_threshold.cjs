@@ -34,7 +34,7 @@ const chrome = {
   action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}}
 };
 const context = vm.createContext({chrome,console,crypto,Date:ClockDate,URL,URLSearchParams,BigInt,Buffer,
-  setInterval(){},fetch:async(url,options)=>{
+  setInterval(){},setTimeout(){},fetch:async(url,options)=>{
     if (url.endsWith('/recovery-alert')) alerts.push(JSON.parse(options.body));
     return {ok:true};
   }});

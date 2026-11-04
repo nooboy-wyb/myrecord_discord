@@ -29,7 +29,7 @@ const chrome = {
 };
 const source = fs.readFileSync(require.resolve('../edge-discord-collector/background.js'),'utf8');
 vm.runInNewContext(source,{chrome,console,crypto,Date,URL,URLSearchParams,BigInt,Buffer,
-  setInterval(){},fetch:async url => url.endsWith('/recovery-alert')
+  setInterval(){},setTimeout(){},fetch:async url => url.endsWith('/recovery-alert')
     ? new Promise(resolve => {pendingAlert=resolve;}) : {ok:true}});
 
 (async () => {
