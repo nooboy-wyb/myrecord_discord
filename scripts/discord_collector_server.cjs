@@ -175,6 +175,7 @@ function authorized(req) {
 }
 let forwarder = null;
 const recoveryNoticeAt = new Map();
+let delayedRecoveryDiagnostics = 0;
 const server = http.createServer((req, res) => {
   const reply = (status, value) => {res.writeHead(status, {'Content-Type':'application/json'}); res.end(JSON.stringify(value));};
   if (req.method === 'POST' && req.url === '/v1/collector/page-status') {
@@ -204,8 +205,14 @@ const server = http.createServer((req, res) => {
       const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const result = saveDiagnostic(event);
       if (result.saved && /^RECOVERY_(?:STARTED|RETRY_REQUESTED|ATTEMPT_TIMEOUT|RELOAD_FAILED|SCAN_RESTORED)$/.test(event.code)) {
-        console.log(`Discord 自恢复事件：${event.code}，频道 ${event.channel_id}，第 ${event.attempt || 0} 次，` +
-          `事件时间 ${new Date(event.at).toISOString()}，连续失败 ${Number(event.detail?.failed_attempts || 0)} 次。`);
+        if (Date.now() - event.at > 2 * 60_000) {
+          delayedRecoveryDiagnostics++;
+          if (delayedRecoveryDiagnostics === 1 || delayedRecoveryDiagnostics % 100 === 0)
+            console.log(`补记旧 Discord 自恢复诊断 ${delayedRecoveryDiagnostics} 条；最新事件时间 ${new Date(event.at).toISOString()}，详情已保存到诊断数据库。`);
+        } else {
+          console.log(`Discord 自恢复事件：${event.code}，频道 ${event.channel_id}，第 ${event.attempt || 0} 次，` +
+            `事件时间 ${new Date(event.at).toISOString()}，连续失败 ${Number(event.detail?.failed_attempts || 0)} 次。`);
+        }
       }
       reply(200,result);
     })().catch(error => reply(400,{error:error.message}));
@@ -231,8 +238,8 @@ const server = http.createServer((req, res) => {
       const labels = fs.existsSync(labelFile) ? JSON.parse(fs.readFileSync(labelFile,'utf8')) : {};
       const label = labels[event.channelId] || event.channelId;
       const description = {recovered:'自动恢复成功，已重新识别到消息',
-        timeout:'自动恢复连续两次未成功：仍未重新识别到消息，请人工检查；扩展仍会继续重试',
-        failed:'自动恢复连续两次未成功：标签页重载失败，请人工检查；扩展仍会继续重试',
+        timeout:'自动恢复连续两次未成功：仍未重新识别到消息，请人工检查；快速重试已暂停，保底刷新继续',
+        failed:'自动恢复连续两次未成功：标签页重载失败，请人工检查；快速重试已暂停，保底刷新继续',
         test_refreshed:'频道页已完成重载；这不代表出现了新消息',
         test_failed:'频道页重载失败，请检查扩展弹窗'}[event.status];
       const isTest = event.status.startsWith('test_');
@@ -246,6 +253,10 @@ const server = http.createServer((req, res) => {
             error,detail:{status:event.status}});
         } catch (logError) { console.warn('Collector alert diagnostic:',logError.message); }
       };
+      if (!isTest && now - event.requestedAt > 10 * 60_000) {
+        logAlert('ALERT_SUPPRESSED_STALE');
+        return reply(200,{ok:true,suppressed:true});
+      }
       if (!isTest && (recoveryAlertAlreadyHandled(event)
         || now - Number(recoveryNoticeAt.get(noticeKey) || 0) < 40 * 60_000)) {
         logAlert('ALERT_SUPPRESSED');
@@ -367,7 +378,7 @@ async function backfillToday() {
   }
 }
 if (require.main === module) server.listen(8765, '127.0.0.1', () => {
-  console.log(`Discord collector server v0.2.5 listening on http://127.0.0.1:8765 ; token: ${tokenPath}`);
+  console.log(`Discord collector server v0.2.6 listening on http://127.0.0.1:8765 ; token: ${tokenPath}`);
   setTimeout(() => pageStatusReporter.warnIfNoReport(),90_000).unref();
   backfillToday().catch(error => console.error('Backfill:', error.message));
   if (process.env.QQ_FORWARD_ENABLED === '1') {
