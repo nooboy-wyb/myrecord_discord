@@ -27,6 +27,8 @@ async function addRequestedChannelsOnce() {
 }
 addRequestedChannelsOnce().catch(error => console.error('Channel setup:', error));
 let sending = false;
+let uploadWakeRequested = false;
+let captureRetryTimer;
 let queueMutation = Promise.resolve();
 function mutateQueue(change) {
   const operation = queueMutation.then(async () => {
@@ -53,13 +55,34 @@ async function enqueue(message) {
   });
   await flush();
 }
+function scheduleCaptureRetry(retryAt) {
+  if (captureRetryTimer != null) clearTimeout(captureRetryTimer);
+  captureRetryTimer = setTimeout(() => {
+    captureRetryTimer = undefined;
+    flush().catch(error => console.error('Capture retry:',error));
+  },Math.max(0,retryAt - Date.now()));
+}
 async function flush() {
+  uploadWakeRequested = true;
   if (sending) return;
   sending = true;
   try {
-    const {token = '', queue = []} = await chrome.storage.local.get(['token', 'queue']);
-    if (!token || !queue.length) return;
-    for (const item of queue) {
+    while (true) {
+      // Remember wakeups that arrive while this storage read is pending.
+      uploadWakeRequested = false;
+      const {token = '', queue = [], captureRetryAt = 0, captureRetryFailures = 0} =
+        await chrome.storage.local.get(['token','queue','captureRetryAt','captureRetryFailures']);
+      if (!token) return;
+      if (!queue.length) {
+        if (uploadWakeRequested) continue;
+        return;
+      }
+      if (captureRetryAt > Date.now()) {
+        scheduleCaptureRetry(captureRetryAt);
+        return;
+      }
+      // Read a fresh head after every acknowledgement, including new arrivals.
+      const item = queue[0];
       try {
         const response = await fetch(ENDPOINT, {
           method: 'POST', headers: {'Content-Type': 'application/json', 'X-Collector-Token': token},
@@ -75,24 +98,32 @@ async function flush() {
           rejectedCaptures.push({channelId:item.message.channel_id,
             sourceMessageId:item.message.source_message_id,error:detail,at:Date.now()});
           await chrome.storage.local.set({rejectedCaptures:rejectedCaptures.slice(-100),
-            lastError:`消息 ${item.message.source_message_id} 被本机拒收，请检查扩展诊断`,lastErrorAt:Date.now()});
+            captureRetryAt:0,captureRetryFailures:0,
+            lastError:'消息 '+item.message.source_message_id+' 被本机拒收，请检查扩展诊断',lastErrorAt:Date.now()});
           await queueDiagnostic('CAPTURE_REJECTED',{channel_id:item.message.channel_id,
             source_message_id:item.message.source_message_id,error:detail});
           continue;
         }
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) throw new Error('HTTP '+response.status);
         await mutateQueue(current => {
           const index = current.findIndex(x => x.key === item.key);
           if (index >= 0) current.splice(index,1);
         });
-        await chrome.storage.local.set({lastSavedAt: Date.now(), lastError: ''});
+        if (captureRetryTimer != null) clearTimeout(captureRetryTimer);
+        captureRetryTimer = undefined;
+        await chrome.storage.local.set({lastSavedAt:Date.now(),lastError:'',
+          captureRetryAt:0,captureRetryFailures:0});
       } catch (error) {
         const previous = (await chrome.storage.local.get('lastError')).lastError || '';
-        await chrome.storage.local.set({lastError: String(error), lastErrorAt: Date.now()});
+        const failures = Math.min(Number(captureRetryFailures) + 1,6);
+        const retryAt = Date.now() + Math.min(30000,1000 * 2 ** (failures - 1));
+        await chrome.storage.local.set({lastError:String(error),lastErrorAt:Date.now(),
+          captureRetryAt:retryAt,captureRetryFailures:failures});
         if (previous !== String(error)) await queueDiagnostic('CAPTURE_UPLOAD_FAILED',{
           channel_id:item.message.channel_id,source_message_id:item.message.source_message_id,
           error:String(error)});
-        break;
+        scheduleCaptureRetry(retryAt);
+        return;
       }
     }
   } finally { sending = false; }

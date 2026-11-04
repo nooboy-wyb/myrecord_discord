@@ -86,6 +86,7 @@ async function verifyPollAndUpload() {
   assert.equal(vm.runInContext('sending',ctx),false,'timeout releases the uploader');
   assert(data.queue[0].message.capture_trace.queued_at>=now);
   failUpload=false;
+  data.captureRetryAt=Date.now()-1; // Retry after the persisted deadline.
   await vm.runInContext('flush()',ctx);
   assert.equal(data.queue.length,0,'retry safely acknowledges the retained capture');
 }

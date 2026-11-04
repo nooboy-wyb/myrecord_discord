@@ -23,7 +23,7 @@ const context = vm.createContext({
     tabs:{onUpdated:{addListener:noop}},runtime:{onMessage:{addListener:noop},onStartup:{addListener:noop},onInstalled:{addListener:noop}},
     action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}}},
   fetch:async()=>{throw Error('collector offline');},
-  setInterval:noop,console,crypto:webcrypto,Date,URL,URLSearchParams,BigInt,Buffer
+  setInterval:noop,setTimeout:()=>0,clearTimeout:noop,AbortSignal,console,crypto:webcrypto,Date,URL,URLSearchParams,BigInt,Buffer
 });
 vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/background.js'),'utf8'),context);
 
