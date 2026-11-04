@@ -183,12 +183,13 @@ async function flushRecoveryAlerts() {
     }
   } finally { alertSending = false; }
 }
-const staleAfterMs = 60_000;
-const backgroundStaleAfterMs = 2 * 60_000;
+const scanStaleAfterMs = 2 * 60_000;
 const periodicRefreshIntervalMs = 30 * 60_000;
 const recoveryRetryMs = 60_000;
+const recoveryPauseMs = 30 * 60_000;
 const channelFromUrl = url => url?.match(/^https:\/\/discord\.com\/channels\/(?:\d+|@me)\/(\d+)(?:[/?#]|$)/)?.[1];
 const healthKey = tabId => `health:${tabId}`;
+const pollKey = tabId => `poll:${tabId}`;
 const diagnosticHealth = (tab,channelId,health,extra = {}) => ({
   channel_id:channelId,tab_id:tab.id,incident_at:Number(health.incidentStartedAt || 0) || null,
   attempt:Number(health.attempt || 0),requested_at:Number(health.requestedAt || 0) || null,
@@ -216,15 +217,14 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
       lastRefreshCompleted: [], lastRefreshError: ''});
     try {
       const {allowedChannels = [], token = '', lastRefreshByTab = {},
+        lastPeriodicRefreshByTab = {},
         periodicScheduleVersion = 0, refreshTestMode = {}} =
         await chrome.storage.local.get(['allowedChannels', 'token', 'lastRefreshByTab',
-          'periodicScheduleVersion','refreshTestMode']);
+          'lastPeriodicRefreshByTab','periodicScheduleVersion','refreshTestMode']);
       if (!token) throw new Error('未配置采集令牌');
       if (!allowedChannels.length) throw new Error('没有允许采集的频道');
       flush().catch(error => console.error('Queue flush before patrol:',error));
       const tabs = await chrome.tabs.query({url: 'https://discord.com/channels/*'});
-      const focusedWindowIds = new Set((await chrome.windows.getAll())
-        .filter(window => window.focused).map(window => window.id));
       if (periodicScheduleVersion !== 1) {
         for (const tab of tabs) {
           if (tab.id == null || !allowedChannels.includes(channelFromUrl(tab.url))) continue;
@@ -232,7 +232,8 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
         }
         await chrome.storage.local.set({lastRefreshByTab,periodicScheduleVersion:1});
       }
-      const healthRecords = await chrome.storage.local.get(tabs.map(tab => healthKey(tab.id)));
+      const healthRecords = await chrome.storage.local.get(tabs.flatMap(tab =>
+        [healthKey(tab.id),pollKey(tab.id)]));
       const {recoveryRetryVersion = 0} = await chrome.storage.local.get('recoveryRetryVersion');
       if (recoveryRetryVersion !== 3) {
         const revised = {recoveryRetryVersion:3};
@@ -262,10 +263,12 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
         if (health.incidentStartedAt && currentHealth.incidentStartedAt === health.incidentStartedAt
             && currentHealth.status === 'recovering'
             && Number(currentHealth.failedRequestAt || 0) !== Number(currentHealth.requestedAt || 0)
-            && startedAt - Number(currentHealth.requestedAt || 0) >= recoveryRetryMs) {
+            && startedAt - Math.max(Number(currentHealth.requestedAt || 0),
+              Number(currentHealth.loadedAt || 0)) >= recoveryRetryMs) {
           const failedAttempts = Number(currentHealth.failedAttempts || 0) + 1;
           const shouldAlert = failedAttempts >= 2 && !currentHealth.outcomeNotifiedAt;
           const failure = {...currentHealth,failedAttempts,failedRequestAt:currentHealth.requestedAt,
+            recoveryPausedUntil:failedAttempts >= 2 ? startedAt + recoveryPauseMs : 0,
             outcomeNotifiedAt:shouldAlert ? startedAt : Number(currentHealth.outcomeNotifiedAt || 0)};
           Object.assign(health,failure);
           await chrome.storage.local.set({[healthKey(tab.id)]:failure});
@@ -278,46 +281,53 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
           lastRefreshByTab[tab.id] = startedAt;
           refreshClockChanged = true;
         }
+        if (!lastPeriodicRefreshByTab[tab.id]) {
+          lastPeriodicRefreshByTab[tab.id] = Number(lastRefreshByTab[tab.id]) || startedAt;
+          refreshClockChanged = true;
+        }
         const lastRefresh = Number(lastRefreshByTab[tab.id]);
-        if (!force && !test && startedAt < Number(health.nextAttemptAt || 0)) continue;
-        const foreground = tab.active && focusedWindowIds.has(tab.windowId);
-        const staleThreshold = foreground ? staleAfterMs : backgroundStaleAfterMs;
-        const scanStale = tab.discarded || startedAt - (lastScan || lastRefresh) >= staleThreshold
-          || startedAt - (lastGood || lastRefresh) >= staleThreshold;
-        const candidate = {tab, channelId, lastScan, lastGood, lastRefresh, health,foreground,
-          staleThreshold,scanStale};
-        if (force || test || scanStale) candidates.push(candidate);
-        else if (startedAt - lastRefresh >= periodicRefreshIntervalMs) periodicCandidates.push(candidate);
+        const poll = healthRecords[pollKey(tab.id)] || {};
+        const heartbeat = Math.max(lastScan,Number(poll.lastSuccessAt || 0));
+        const scanStale = tab.discarded || Number(poll.consecutiveFailures || 0) >= 2
+          && startedAt - (heartbeat || lastRefresh) >= scanStaleAfterMs;
+        const candidate = {tab, channelId, lastScan, lastGood, lastRefresh, health,
+          poll,heartbeat,scanStale};
+        if (force || test || scanStale && startedAt >= Math.max(Number(health.nextAttemptAt || 0),
+          health.incidentStartedAt ? Number(health.loadedAt || 0) + recoveryRetryMs : 0)
+          && startedAt >= Number(health.recoveryPausedUntil || 0)) candidates.push(candidate);
+        if (startedAt - Number(lastPeriodicRefreshByTab[tab.id]) >= periodicRefreshIntervalMs)
+          periodicCandidates.push(candidate);
       }
-      if (refreshClockChanged) await chrome.storage.local.set({lastRefreshByTab});
+      if (refreshClockChanged) await chrome.storage.local.set({lastRefreshByTab,lastPeriodicRefreshByTab});
       candidates.sort((a, b) => force || test ? a.lastRefresh - b.lastRefresh : a.lastGood - b.lastGood);
-      periodicCandidates.sort((a, b) => a.lastRefresh - b.lastRefresh);
-      const selected = candidates[0] || (!recoveryOnly && periodicCandidates[0]);
+      periodicCandidates.sort((a, b) =>
+        Number(lastPeriodicRefreshByTab[a.tab.id]) - Number(lastPeriodicRefreshByTab[b.tab.id]));
+      const selected = force || test ? candidates[0]
+        : !recoveryOnly && periodicCandidates[0] || candidates[0];
       if (selected) {
-        const periodicSelected = !candidates.length;
+        const periodicSelected = !force && !test && selected === periodicCandidates[0];
         selectedRecovery = !periodicSelected;
         const {tab, channelId, health} = selected;
-        const recoveryAlert = !force && !test && selected.scanStale
+        const recoveryAlert = !periodicSelected && !force && !test && selected.scanStale
           && (selected.lastScan > 0 || selected.lastGood > 0);
         const incidentStartedAt = recoveryAlert ? Number(health.incidentStartedAt || startedAt)
           : periodicSelected ? 0 : Number(health.incidentStartedAt || 0);
         const attempt = periodicSelected || force ? 0 : Math.min(Number(health.attempt || 0) + 1, 100);
         const nextAttemptAt = periodicSelected || force || test ? 0 : startedAt + recoveryRetryMs;
-        const triggerCode = tab.discarded ? 'TAB_DISCARDED'
-          : startedAt - (selected.lastScan || selected.lastRefresh) >= selected.staleThreshold
-            ? 'SCAN_HEARTBEAT_STALE'
-            : startedAt - (selected.lastGood || selected.lastRefresh) >= selected.staleThreshold
-              ? 'NO_MESSAGES_RECOGNIZED' : 'SCHEDULED';
+        const triggerCode = periodicSelected ? 'SCHEDULED' : tab.discarded ? 'TAB_DISCARDED'
+          : 'POLL_FAILURE_AND_SCAN_STALE';
         const key = healthKey(tab.id);
         try {
           const {pendingRefresh = {}} = await chrome.storage.local.get('pendingRefresh');
           pendingRefresh[tab.id] = channelId;
           lastRefreshByTab[tab.id] = startedAt;
-          await chrome.storage.local.set({pendingRefresh, lastRefreshByTab,
+          if (periodicSelected) lastPeriodicRefreshByTab[tab.id] = startedAt;
+          await chrome.storage.local.set({pendingRefresh, lastRefreshByTab,lastPeriodicRefreshByTab,
             lastRefreshRequested: [channelId], [key]: {...health,channelId,status:'recovering',
               attempt,requestedAt:startedAt,loadedAt:0,nextAttemptAt,error:'',
               testRunId:test ? refreshTestMode.runId : 0,
               incidentStartedAt,outcomeNotifiedAt:periodicSelected ? 0 : Number(health.outcomeNotifiedAt || 0),
+              recoveryPausedUntil:periodicSelected ? 0 : Number(health.recoveryPausedUntil || 0),
               failedAttempts:incidentStartedAt === Number(health.incidentStartedAt || 0)
                 ? Number(health.failedAttempts || 0) : 0,
               failedRequestAt:incidentStartedAt === Number(health.incidentStartedAt || 0)
@@ -330,7 +340,7 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
             diagnosticHealth(tab,channelId,health,{incident_at:incidentStartedAt || null,
               attempt,requested_at:startedAt,next_attempt_at:nextAttemptAt || null,
               detail:{trigger_code:triggerCode,discarded:tab.discarded,
-                active:tab.active,window_focused:focusedWindowIds.has(tab.windowId),
+                poll_failures:Number(selected.poll.consecutiveFailures || 0),
                 failed_attempts:Number(health.failedAttempts || 0)}}));
           await chrome.tabs.reload(tab.id);
           if (test) await chrome.storage.local.set({refreshTestMode:{...refreshTestMode,
@@ -343,6 +353,7 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
           const shouldAlert = incidentStartedAt && failedAttempts >= 2 && !health.outcomeNotifiedAt;
           await chrome.storage.local.set({[key]: {...health,channelId,status:'failed',attempt,
             requestedAt:startedAt,incidentStartedAt,nextAttemptAt,error:String(error),
+            recoveryPausedUntil:failedAttempts >= 2 ? startedAt + recoveryPauseMs : 0,
             failedAttempts,failedRequestAt:incidentStartedAt ? startedAt : 0,
             outcomeNotifiedAt:shouldAlert ? startedAt : Number(health.outcomeNotifiedAt || 0)}});
           await queueDiagnostic(incidentStartedAt ? 'RECOVERY_RELOAD_FAILED' : 'RELOAD_FAILED',
@@ -369,12 +380,12 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
       const details = tabs.filter(tab => allowedChannels.includes(channelFromUrl(tab.url)))
         .map(tab => {
           const health = currentHealth[healthKey(tab.id)] || {};
-          const healthy = !tab.discarded && (tab.active && focusedWindowIds.has(tab.windowId)
-            ? startedAt - Number(health.lastScanAt || 0) < staleAfterMs
-              && startedAt - Number(health.lastGoodAt || 0) < staleAfterMs
-            : Number(health.lastGoodAt || 0) > 0
-              && startedAt - Number(health.lastScanAt || 0) < backgroundStaleAfterMs
-              && startedAt - Number(health.lastGoodAt || 0) < backgroundStaleAfterMs);
+          const poll = currentHealth[pollKey(tab.id)] || {};
+          const heartbeat = Math.max(Number(health.lastScanAt || 0),
+            Number(poll.lastSuccessAt || 0));
+          const healthy = !tab.discarded && heartbeat > 0
+            && startedAt - heartbeat < scanStaleAfterMs
+            && Number(poll.consecutiveFailures || 0) < 2;
           return {tabId:tab.id,channelId:channelFromUrl(tab.url),
             status:health.status === 'recovering' && startedAt < Number(health.nextAttemptAt || 0)
               ? 'recovering' : healthy ? 'healthy' : 'failed',
@@ -406,7 +417,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     const health = (await chrome.storage.local.get(key))[key] || {};
     const loadedAt = Date.now();
     await chrome.storage.local.set({pendingRefresh, lastRefreshCompleted: [...lastRefreshCompleted, channelId],
-      [key]: {...health,loadedAt}});
+      [key]: {...health,loadedAt,nextAttemptAt:health.incidentStartedAt
+        ? loadedAt + recoveryRetryMs : Number(health.nextAttemptAt || 0)}});
     await updateRefreshHistory(tabId,{requestedAt:health.requestedAt,loadedAt});
     await queueDiagnostic(health.incidentStartedAt ? 'RECOVERY_LOAD_COMPLETED' : 'RELOAD_LOAD_COMPLETED',
       diagnosticHealth({id:tabId},channelId,health,{loaded_at:loadedAt,
@@ -465,7 +477,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           incidentStartedAt:recovered ? 0 : Number(health.incidentStartedAt || 0),
           outcomeNotifiedAt:recovered ? 0 : Number(health.outcomeNotifiedAt || 0),
           failedAttempts:recovered ? 0 : Number(health.failedAttempts || 0),
-          failedRequestAt:recovered ? 0 : Number(health.failedRequestAt || 0)};
+          failedRequestAt:recovered ? 0 : Number(health.failedRequestAt || 0),
+          recoveryPausedUntil:recovered ? 0 : Number(health.recoveryPausedUntil || 0)};
+        const pkey = pollKey(tabId);
+        const poll = (await chrome.storage.local.get(pkey))[pkey] || {};
+        update[pkey] = {...poll,lastSuccessAt:scannedAt,consecutiveFailures:0,error:''};
         if (recovered && health.status === 'recovering') {
           await updateRefreshHistory(tabId,{requestedAt:health.requestedAt,recoveredAt:scannedAt});
         }
@@ -560,20 +576,46 @@ async function ensureAlarms() {
     if (!await chrome.alarms.get(name)) await chrome.alarms.create(name,{periodInMinutes:1});
   }
 }
+let pollRunning = false;
 async function pollMonitoredTabs() {
+  if (pollRunning) return;
+  pollRunning = true;
+  try {
   const {allowedChannels = [],token = ''} = await chrome.storage.local.get(['allowedChannels','token']);
   if (!allowedChannels.length) return;
   const tabs = await chrome.tabs.query({url:'https://discord.com/channels/*'});
   const monitored = tabs.filter(tab => tab.id != null && allowedChannels.includes(channelFromUrl(tab.url)));
-  const results = await Promise.all(monitored.map(tab => new Promise(resolve => {
-    const timer = setTimeout(() => resolve({error:'scan response timeout'}),10000);
-    chrome.tabs.sendMessage(tab.id,{type:'pollScan',channelId:channelFromUrl(tab.url)})
-      .then(result => { clearTimeout(timer); resolve(result); })
-      .catch(error => { clearTimeout(timer); resolve({error:String(error)}); });
-  })));
-  const scanning = monitored.filter((_tab,index) => results[index]?.allowed === true
-    && !results[index]?.error)
-    .map(tab => channelFromUrl(tab.url));
+  const records = await chrome.storage.local.get(monitored.map(tab => pollKey(tab.id)));
+  for (let index = 0; index < monitored.length; index += 3) {
+    await Promise.all(monitored.slice(index,index + 3).map(async tab => {
+      const startedAt = Date.now();
+      const result = await new Promise(resolve => {
+        const timer = setTimeout(() => resolve({error:'scan response timeout'}),12000);
+        chrome.tabs.sendMessage(tab.id,{type:'pollScan',channelId:channelFromUrl(tab.url)})
+          .then(value => { clearTimeout(timer); resolve(value); })
+          .catch(error => { clearTimeout(timer); resolve({error:String(error)}); });
+      });
+      const key = pollKey(tab.id);
+      const prior = (await chrome.storage.local.get(key))[key] || records[key] || {};
+      const success = result?.allowed === true && !result.error;
+      const current = {lastAttemptAt:startedAt,latencyMs:Date.now() - startedAt,
+        lastSuccessAt:success ? Date.now() : Number(prior.lastSuccessAt || 0),
+        consecutiveFailures:success ? 0 : Number(prior.consecutiveFailures || 0) + 1,
+        error:success ? '' : String(result?.error || 'scan response invalid').slice(0,200)};
+      records[key] = current;
+      await chrome.storage.local.set({[key]:current});
+      if (current.consecutiveFailures === 2) await queueDiagnostic('POLL_SCAN_UNRESPONSIVE',{
+        channel_id:channelFromUrl(tab.url),tab_id:tab.id,
+        detail:{latency_ms:current.latencyMs,error:current.error}});
+    }));
+  }
+  const healthRecords = await chrome.storage.local.get(monitored.map(tab => healthKey(tab.id)));
+  const scanning = monitored.filter(tab => {
+    const poll = records[pollKey(tab.id)] || {};
+    const health = healthRecords[healthKey(tab.id)] || {};
+    const heartbeat = Math.max(Number(poll.lastSuccessAt || 0),Number(health.lastScanAt || 0));
+    return heartbeat > 0 && Date.now() - heartbeat < scanStaleAfterMs;
+  }).map(tab => channelFromUrl(tab.url));
   if (!token) return;
   try {
     const response = await fetch('http://127.0.0.1:8765/v1/collector/page-status',{
@@ -587,6 +629,7 @@ async function pollMonitoredTabs() {
   } catch (error) {
     await chrome.storage.local.set({lastPageStatusError:String(error)});
   }
+  } finally { pollRunning = false; }
 }
 ensureAlarms().catch(error => console.error('Alarm setup:',error));
 chrome.runtime.onStartup?.addListener(() => ensureAlarms().catch(error => console.error('Alarm startup:',error)));

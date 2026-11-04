@@ -11,6 +11,7 @@ const state = new Map([
   ['token','test-token'],['allowedChannels',[channelId]],
   ['periodicScheduleVersion',1],['recoveryRetryVersion',3],
   ['lastRefreshByTab',{[tabId]:clockMs - 3 * 60_000}],
+  [`poll:${tabId}`,{lastSuccessAt:clockMs - 3 * 60_000,consecutiveFailures:2}],
   [`health:${tabId}`,{channelId,status:'recovering',attempt:1,
     incidentStartedAt:clockMs - 3 * 60_000,requestedAt:clockMs - 2 * 60_000 - 1,
     nextAttemptAt:clockMs - 1,lastScanAt:clockMs - 3 * 60_000,
@@ -58,6 +59,7 @@ vm.runInContext(fs.readFileSync(require.resolve('../edge-discord-collector/backg
     incidentStartedAt:nextIncident,requestedAt:clockMs - 2 * 60_000 - 1,
     nextAttemptAt:clockMs - 1,lastScanAt:nextIncident,lastGoodAt:nextIncident,
     outcomeNotifiedAt:0});
+  state.set(`poll:${tabId}`,{lastSuccessAt:nextIncident,consecutiveFailures:2});
   await vm.runInContext('refreshMonitoredTabs()',context);
   assert.equal(alerts.length,0);
   clockMs += 60_000 + 1;
