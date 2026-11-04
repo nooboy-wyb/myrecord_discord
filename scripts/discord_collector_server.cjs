@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const {DatabaseSync} = require('node:sqlite');
 const {saveDiagnostic,recoveryAlertAlreadyHandled} = require('./collector_diagnostics.cjs');
 const {createPageStatusReporter} = require('./collector_page_status.cjs');
+const {captureDiagnostic} = require('./collector_capture_trace.cjs');
 
 const root = path.resolve(__dirname, '..', 'data');
 fs.mkdirSync(root, {recursive: true});
@@ -348,12 +349,17 @@ const server = http.createServer((req, res) => {
   }
   if (req.method !== 'POST' || req.url !== '/v1/messages') return reply(404, {error:'not found'});
   if (!authorized(req)) return reply(401, {error:'unauthorized'});
+  const receivedAt = Date.now();
   let bytes = 0, chunks = [];
   req.on('data', chunk => {bytes += chunk.length; if (bytes > 1_000_000) req.destroy(); else chunks.push(chunk);});
   req.on('end', async () => {
     try {
       const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const id = save(message);
+      try {
+        const diagnostic = captureDiagnostic(message,receivedAt,Date.now(),crypto.randomUUID());
+        if (diagnostic) saveDiagnostic(diagnostic);
+      } catch (error) { console.warn('Capture timing diagnostic:',error.message); }
       await downloadAttachments(message, id);
       if (!connectedChannels.has(message.channel_id)) {
         connectedChannels.add(message.channel_id);

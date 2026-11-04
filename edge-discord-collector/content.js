@@ -462,9 +462,19 @@
     }
     return [...byId.values()];
   }
-  async function scan(forceResubmit = false) {
+  let scanSequence = 0;
+  async function scan(forceResubmit = false, poll = null) {
     const context = route();
     if (!context) return;
+    const startedAt = Date.now();
+    const scanId = `${startedAt}-${++scanSequence}`;
+    const progress = stage => {
+      if (!poll?.requestId) return;
+      chrome.runtime.sendMessage({type:'scanProgress',channel_id:context.channel_id,
+        request_id:poll.requestId,stage,at:Date.now(),visibility:document.visibilityState}).catch(() => {});
+    };
+    progress('received');
+    try {
     ensurePanel();
     const key = `${context.guild_id}/${context.channel_id}`;
     if (key !== lastRoute) {
@@ -474,7 +484,10 @@
       loadForwarding();
       if (panel?.recovery && !panel.recovery.root.hidden) loadRecovery();
     }
+    progress('config_wait');
     const {allowedChannels = [], channelLabels = {}} = await chrome.storage.local.get(['allowedChannels', 'channelLabels']);
+    const configReadAt = Date.now();
+    progress('dom_scan');
     const allowed = allowedChannels.includes(context.channel_id);
     if (panel) panel.host.style.display = allowed ? '' : 'none';
     if (!allowed) {
@@ -518,6 +531,8 @@
       const fingerprint = JSON.stringify([message.author_display, message.displayed_time, message.body_raw, message.attachments]);
       if (!forceResubmit && seen.get(message.source_message_id) === fingerprint) continue;
       seen.set(message.source_message_id, fingerprint);
+      message.capture_trace = {scan_id:scanId,scan_started_at:startedAt,
+        observed_at:Date.now(),config_ms:configReadAt - startedAt};
       chrome.runtime.sendMessage({type: 'capture', message}).catch(() => {});
     }
     const firstTime = document.querySelector('time');
@@ -535,11 +550,20 @@
         messageClasses: document.querySelectorAll('[class*="message"]').length,
         firstTimeAncestry: ancestry
       },
-      at: Date.now()
+      at: Date.now(),
+      scan_trace:poll?.requestId ? {scan_id:scanId,request_id:poll.requestId,
+        requested_at:poll.requestedAt,started_at:startedAt,completed_at:Date.now(),
+        config_ms:configReadAt - startedAt,dom_ms:Date.now() - configReadAt,
+        visibility:document.visibilityState} : undefined
     }).catch(() => {});
     if (panel) panel.scanInfo.textContent = `最近扫描 ${new Date().toLocaleTimeString('zh-CN')}；识别 ${extracted} 条`;
     if (panel?.input.value && visibleMinutes.has(panel.input.value)) checkLookup();
+    progress('complete');
     return {allowed:true, extracted};
+    } catch (error) {
+      progress('error');
+      throw error;
+    }
   }
   let timer;
   const scheduleScan = () => {
@@ -552,7 +576,7 @@
   window.addEventListener('focus', scheduleScan);
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.type !== 'pollScan' || route()?.channel_id !== request.channelId) return;
-    scan().then(result => sendResponse(result || {allowed:false, extracted:0}))
+    scan(false,request).then(result => sendResponse(result || {allowed:false, extracted:0}))
       .catch(error => sendResponse({error:String(error)}));
     return true;
   });

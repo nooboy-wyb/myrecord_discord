@@ -39,6 +39,8 @@ function mutateQueue(change) {
   return operation;
 }
 async function enqueue(message) {
+  if (message.capture_trace?.scan_id) message = {...message,
+    capture_trace:{...message.capture_trace,queued_at:Date.now()}};
   const key = `${message.channel_id}:${message.source_message_id}:${JSON.stringify([message.body_raw, message.attachments])}`;
   await mutateQueue(queue => {
     if (!queue.some(item => item.key === key)) queue.push({key, message});
@@ -61,7 +63,7 @@ async function flush() {
       try {
         const response = await fetch(ENDPOINT, {
           method: 'POST', headers: {'Content-Type': 'application/json', 'X-Collector-Token': token},
-          body: JSON.stringify(item.message)
+          body: JSON.stringify(item.message), signal:AbortSignal.timeout(30000)
         });
         if (response.status === 400) {
           const detail = (await response.text()).slice(0,200);
@@ -134,7 +136,7 @@ async function flushDiagnostics() {
       try {
         const response = await fetch('http://127.0.0.1:8765/v1/collector/diagnostic',{
           method:'POST',headers:{'Content-Type':'application/json','X-Collector-Token':token},
-          body:JSON.stringify(event)
+          body:JSON.stringify(event), signal:AbortSignal.timeout(8000)
         });
         if (!response.ok) throw Error(`HTTP ${response.status}: ${(await response.text()).slice(0,200)}`);
         await changeDiagnosticQueue(queue => {
@@ -197,6 +199,7 @@ const recoveryPauseMs = 30 * 60_000;
 const channelFromUrl = url => url?.match(/^https:\/\/discord\.com\/channels\/(?:\d+|@me)\/(\d+)(?:[/?#]|$)/)?.[1];
 const healthKey = tabId => `health:${tabId}`;
 const pollKey = tabId => `poll:${tabId}`;
+const pollScanProgress = new Map();
 const diagnosticHealth = (tab,channelId,health,extra = {}) => ({
   channel_id:channelId,tab_id:tab.id,incident_at:Number(health.incidentStartedAt || 0) || null,
   attempt:Number(health.attempt || 0),requested_at:Number(health.requestedAt || 0) || null,
@@ -383,7 +386,8 @@ async function refreshMonitoredTabs(force = false, test = false, recoveryOnly = 
       } else if (test) {
         await chrome.storage.local.set({refreshTestMode:{...refreshTestMode,enabled:false,nextAt:0}});
       }
-      const currentHealth = await chrome.storage.local.get(tabs.map(tab => healthKey(tab.id)));
+      const currentHealth = await chrome.storage.local.get(tabs.flatMap(tab =>
+        [healthKey(tab.id),pollKey(tab.id)]));
       const details = tabs.filter(tab => allowedChannels.includes(channelFromUrl(tab.url)))
         .map(tab => {
           const health = currentHealth[healthKey(tab.id)] || {};
@@ -446,6 +450,15 @@ function runPageStatus(tabId, work) {
 }
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'capture') enqueue(request.message);
+  if (request.type === 'scanProgress' && sender.tab?.id != null
+      && channelFromUrl(sender.tab.url) === request.channel_id) {
+    const pending = pollScanProgress.get(sender.tab.id);
+    if (pending?.request_id === request.request_id
+        && ['received','config_wait','dom_scan','complete','error'].includes(request.stage)) {
+      Object.assign(pending,{stage:request.stage,progress_at:Date.now(),
+        page_at:Number(request.at || 0),visibility:String(request.visibility || '').slice(0,20)});
+    }
+  }
   if (request.type === 'imageNodeGap' && channelFromUrl(sender.tab?.url) === request.channelId
     && /^\d{15,22}$/.test(request.sourceId || '')) {
     queueDiagnostic('IMAGE_NODE_SKIPPED',{channel_id:request.channelId,
@@ -493,6 +506,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           await updateRefreshHistory(tabId,{requestedAt:health.requestedAt,recoveredAt:scannedAt});
         }
         await chrome.storage.local.set(update);
+        if (request.scan_trace?.request_id) await queueDiagnostic('SCAN_COMPLETED',{
+          channel_id:request.channel_id,tab_id:tabId,
+          detail:{...request.scan_trace,extracted:Number(request.extracted || 0)}});
         if (recovered && (health.status === 'recovering' || health.incidentStartedAt)) {
           await queueDiagnostic(health.incidentStartedAt ? 'RECOVERY_SCAN_RESTORED' : 'RELOAD_SCAN_RESTORED',
             diagnosticHealth({id:tabId},request.channel_id,health,{
@@ -596,9 +612,13 @@ async function pollMonitoredTabs() {
   for (let index = 0; index < monitored.length; index += 3) {
     await Promise.all(monitored.slice(index,index + 3).map(async tab => {
       const startedAt = Date.now();
+      const requestId = crypto.randomUUID();
+      const progress = {request_id:requestId,stage:'request_sent',progress_at:startedAt};
+      pollScanProgress.set(tab.id,progress);
       const result = await new Promise(resolve => {
         const timer = setTimeout(() => resolve({error:'scan response timeout'}),12000);
-        chrome.tabs.sendMessage(tab.id,{type:'pollScan',channelId:channelFromUrl(tab.url)})
+        chrome.tabs.sendMessage(tab.id,{type:'pollScan',channelId:channelFromUrl(tab.url),
+          requestId,requestedAt:startedAt})
           .then(value => { clearTimeout(timer); resolve(value); })
           .catch(error => { clearTimeout(timer); resolve({error:String(error)}); });
       });
@@ -611,9 +631,18 @@ async function pollMonitoredTabs() {
         error:success ? '' : String(result?.error || 'scan response invalid').slice(0,200)};
       records[key] = current;
       await chrome.storage.local.set({[key]:current});
+      pollScanProgress.delete(tab.id);
+      const detail = {request_id:requestId,requested_at:startedAt,
+        extension_version:chrome.runtime.getManifest?.().version || '',
+        latency_ms:current.latencyMs,error:current.error,last_stage:progress.stage,
+        progress_at:progress.progress_at,page_at:progress.page_at || null,
+        visibility:progress.visibility || '',extracted:Number(result?.extracted || 0),
+        discarded:!!tab.discarded,loading:tab.status === 'loading'};
+      await queueDiagnostic('POLL_SCAN_RESULT',{
+        channel_id:channelFromUrl(tab.url),tab_id:tab.id,detail});
       if (current.consecutiveFailures === 2) await queueDiagnostic('POLL_SCAN_UNRESPONSIVE',{
         channel_id:channelFromUrl(tab.url),tab_id:tab.id,
-        detail:{latency_ms:current.latencyMs,error:current.error}});
+        detail});
     }));
   }
   const healthRecords = await chrome.storage.local.get(monitored.map(tab => healthKey(tab.id)));
