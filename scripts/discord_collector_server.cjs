@@ -7,13 +7,14 @@ const {DatabaseSync} = require('node:sqlite');
 const {saveDiagnostic,recoveryAlertAlreadyHandled} = require('./collector_diagnostics.cjs');
 const {createPageStatusReporter} = require('./collector_page_status.cjs');
 const {captureDiagnostic} = require('./collector_capture_trace.cjs');
+const {createAttachmentQueue} = require('./collector_attachment_queue.cjs');
 
 const root = path.resolve(__dirname, '..', 'data');
 fs.mkdirSync(root, {recursive: true});
 const tokenPath = path.join(root, 'collector-token.txt');
 if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, crypto.randomBytes(32).toString('base64url'));
 const token = fs.readFileSync(tokenPath, 'utf8').trim();
-const imageHosts = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+const attachmentQueue = createAttachmentQueue({root,onEvent:saveDiagnostic});
 const connectedChannels = new Set();
 const labelFile = path.join(root,'qq-channel-labels.json');
 const pageStatusReporter = createPageStatusReporter({
@@ -33,7 +34,8 @@ function save(message) {
       throw Error('Discord message ID and timestamp do not match');
     }
   }
-  const folder = path.join(root, shanghaiDate());
+  const archiveDate = shanghaiDate();
+  const folder = path.join(root, archiveDate);
   fs.mkdirSync(folder, {recursive: true});
   const db = new DatabaseSync(path.join(folder, 'messages.sqlite'));
   try {
@@ -67,6 +69,7 @@ function save(message) {
       : message.attachments.length ? 'text_and_image' : 'text_only';
     const digest = crypto.createHash('sha256').update(JSON.stringify([message.body_raw, message.attachments])).digest('hex');
     const now = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE');
     const fields = ['channel_id','source_message_id','guild_id','channel_name','message_url','author_display','displayed_time','source_timestamp'];
     db.prepare(`INSERT OR IGNORE INTO discord_web_messages (${fields.join(',')},captured_at,body_raw,attachments_json,payload_json,content_sha256,body_kind) VALUES (${Array(14).fill('?').join(',')})`).run(...fields.map(f => message[f] ?? null), now, message.body_raw, JSON.stringify(message.attachments), JSON.stringify(message), digest, bodyKind);
     const row = db.prepare('SELECT id,author_display FROM discord_web_messages WHERE channel_id=? AND source_message_id=? AND content_sha256=?').get(String(message.channel_id), String(message.source_message_id), digest);
@@ -77,64 +80,9 @@ function save(message) {
       db.prepare('UPDATE discord_web_messages SET author_display=? WHERE id=?').run(correctedAuthor,row.id);
     }
     db.prepare('INSERT INTO discord_web_observations(message_id,observed_at) VALUES (?,?)').run(row.id, now);
+    attachmentQueue.enqueue(db,archiveDate,row.id,message);
+    db.exec('COMMIT');
     return row.id;
-  } finally { db.close(); }
-}
-async function downloadAttachments(message, messageId) {
-  function originalAttachmentUrl(value) {
-    const url = new URL(value);
-    if (url.protocol !== 'https:' || !imageHosts.has(url.hostname)) return null;
-    if (url.pathname.startsWith('/attachments/')) {
-      url.hostname = 'cdn.discordapp.com';
-      for (const key of [...url.searchParams.keys()]) {
-        if (!['ex', 'is', 'hm'].includes(key)) url.searchParams.delete(key);
-      }
-      url.search = url.searchParams.toString();
-    } else if (!(url.hostname === 'media.discordapp.net' && url.pathname.startsWith('/external/'))) {
-      return null;
-    }
-    url.hash = '';
-    return url.href;
-  }
-  const items = message.attachments.filter(item => {
-    try {
-      return !!originalAttachmentUrl(item.source_url);
-    } catch { return false; }
-  });
-  if (!items.length) return;
-  const folder = path.join(root, shanghaiDate());
-  const attachmentDir = path.join(folder, 'attachments');
-  fs.mkdirSync(attachmentDir, {recursive: true});
-  const db = new DatabaseSync(path.join(folder, 'messages.sqlite'));
-  try {
-    db.exec(`CREATE TABLE IF NOT EXISTS discord_web_attachment_files (
-      id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, source_url TEXT NOT NULL,
-      local_path TEXT, sha256 TEXT, status TEXT NOT NULL, error TEXT,
-      updated_at TEXT NOT NULL, UNIQUE(message_id,source_url));`);
-    for (const item of items) {
-      const existing = db.prepare('SELECT status FROM discord_web_attachment_files WHERE message_id=? AND source_url=?').get(messageId, item.source_url);
-      if (existing?.status === 'saved') continue;
-      let status = 'failed', localPath = null, digest = null, error = null;
-      try {
-        const response = await fetch(originalAttachmentUrl(item.source_url), {signal: AbortSignal.timeout(15000)});
-        if (!response.ok) throw Error(`HTTP ${response.status}`);
-        const length = Number(response.headers.get('content-length') || 0);
-        if (length > 20_000_000) throw Error('image too large');
-        const bytes = Buffer.from(await response.arrayBuffer());
-        if (bytes.length > 20_000_000) throw Error('image too large');
-        digest = crypto.createHash('sha256').update(bytes).digest('hex');
-        const ext = path.extname(new URL(item.source_url).pathname).toLowerCase();
-        const safeExt = ['.png','.jpg','.jpeg','.webp','.gif'].includes(ext) ? ext : '.bin';
-        localPath = path.join(attachmentDir, digest + safeExt);
-        if (!fs.existsSync(localPath)) fs.writeFileSync(localPath, bytes);
-        status = 'saved';
-      } catch (cause) { error = [cause.message, cause.cause?.code, cause.cause?.message].filter(Boolean).join(' | '); }
-      db.prepare(`INSERT INTO discord_web_attachment_files
-        (message_id,source_url,local_path,sha256,status,error,updated_at) VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(message_id,source_url) DO UPDATE SET local_path=excluded.local_path,
-        sha256=excluded.sha256,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at`)
-        .run(messageId, item.source_url, localPath, digest, status, error, new Date().toISOString());
-    }
   } finally { db.close(); }
 }
 function lookupMinute(channelId, localMinute) {
@@ -352,7 +300,7 @@ const server = http.createServer((req, res) => {
   const receivedAt = Date.now();
   let bytes = 0, chunks = [];
   req.on('data', chunk => {bytes += chunk.length; if (bytes > 1_000_000) req.destroy(); else chunks.push(chunk);});
-  req.on('end', async () => {
+  req.on('end', () => {
     try {
       const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const id = save(message);
@@ -360,33 +308,34 @@ const server = http.createServer((req, res) => {
         const diagnostic = captureDiagnostic(message,receivedAt,Date.now(),crypto.randomUUID());
         if (diagnostic) saveDiagnostic(diagnostic);
       } catch (error) { console.warn('Capture timing diagnostic:',error.message); }
-      await downloadAttachments(message, id);
       if (!connectedChannels.has(message.channel_id)) {
         connectedChannels.add(message.channel_id);
         console.log(`频道 ${String(message.channel_name || message.channel_id).slice(0,40)}：采集服务已收到扩展消息；页面在线状态以扩展巡检为准。`);
       }
       reply(200, {id});
+      attachmentQueue.wake();
     }
     catch (error) { reply(400, {error:String(error.message)}); }
   });
 });
-async function backfillToday() {
-  const file = path.join(root, shanghaiDate(), 'messages.sqlite');
+function backfillToday() {
+  const date = shanghaiDate();
+  const file = path.join(root, date, 'messages.sqlite');
   if (!fs.existsSync(file)) return;
-  const db = new DatabaseSync(file, {readOnly: true});
-  let rows;
-  try { rows = db.prepare('SELECT id,payload_json FROM discord_web_messages WHERE attachments_json<>?').all('[]'); }
-  catch { return; }
-  finally { db.close(); }
-  for (const row of rows) {
-    try { await downloadAttachments(JSON.parse(row.payload_json), row.id); }
-    catch (error) { console.error('Attachment backfill:', error.message); }
-  }
+  const db = new DatabaseSync(file);
+  try {
+    const rows = db.prepare('SELECT id,payload_json FROM discord_web_messages WHERE attachments_json<>?').all('[]');
+    db.exec('BEGIN IMMEDIATE');
+    for (const row of rows) attachmentQueue.enqueue(db,date,row.id,JSON.parse(row.payload_json));
+    db.exec('COMMIT');
+  } finally { db.close(); }
 }
 if (require.main === module) server.listen(8765, '127.0.0.1', () => {
-  console.log(`Discord collector server v0.2.6 listening on http://127.0.0.1:8765 ; token: ${tokenPath}`);
+  console.log(`Discord collector server v0.2.7 listening on http://127.0.0.1:8765 ; token: ${tokenPath}`);
   setTimeout(() => pageStatusReporter.warnIfNoReport(),90_000).unref();
-  backfillToday().catch(error => console.error('Backfill:', error.message));
+  try { backfillToday(); }
+  catch (error) { console.error('Attachment queue backfill:', error.message); }
+  attachmentQueue.start();
   if (process.env.QQ_FORWARD_ENABLED === '1') {
     try {
       forwarder = require('./qq/core/forwarder.cjs');

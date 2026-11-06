@@ -74,5 +74,17 @@ const processMessage = vm.runInNewContext(`${source.slice(start,end)}\nprocessMe
   const requestsAfterUnknown = requests.length;
   assert.equal(await processMessage(uncertain,{group_openid:'group3'}),'unknown');
   assert.equal(requests.length,requestsAfterUnknown,'an uncertain group message must not be sent again');
+  failImageMessage = false;
+  const pending = {...message,source_message_id:'1234567890123456791',content_sha256:'pending',
+    attachments:[{...message.attachments[0],status:'pending',local_path:null}]};
+  const beforePending = requests.length;
+  assert.equal(await processMessage(pending,{group_openid:'group3'}),'deferred');
+  assert.deepEqual(requests.slice(beforePending),['messages'],
+    'pending downloads must not call QQ files or messages for the image');
+  assert.equal(imageStates.at(-1),'preparing');
+  pending.attachments = message.attachments;
+  assert.equal(await processMessage(pending,{group_openid:'group3'}),'accepted');
+  assert.deepEqual(requests.slice(beforePending),['messages','files','messages'],
+    'a newly downloaded image retries immediately without resending accepted text');
   console.log('An image upload failure retries safely without resending accepted text.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

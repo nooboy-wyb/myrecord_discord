@@ -343,6 +343,15 @@ function record(key, index, type, message, status, detail = {}, context = {}) {
       context.imageRepair || context.confirmedRetry ? 'repair' : context.history || context.replayRequestId ? 'history' : 'live',
       context.replayRequestId ?? null);
 }
+function rememberPendingLiveImage(message, groupOpenid) {
+  if (!message.attachments.some(item => item.status === 'pending')) return;
+  const key = crypto.createHash('sha256').update(JSON.stringify([
+    groupOpenid,message.channel_id,message.source_message_id,message.content_sha256
+  ])).digest('hex');
+  if (!state.prepare('SELECT status FROM forward_attempts WHERE task_key=? AND part_index=0').get(key)) {
+    record(key,0,'image',message,'preparing',{}, {group_openid:groupOpenid});
+  }
+}
 async function processMessage(message, context = {}) {
   const groupOpenid = context.group_openid || target.group_openid;
   if (Date.now() < Number(groupCooldownUntil.get(groupOpenid) || 0)) return 'deferred';
@@ -368,6 +377,14 @@ async function processMessage(message, context = {}) {
   for (const [index, part] of parts.entries()) {
     const previous = state.prepare('SELECT status,attempted_at FROM forward_attempts WHERE task_key=? AND part_index=?').get(key,index);
     if (previous?.status === 'accepted') continue;
+    const pendingAttachment = part.type === 'image' && message.attachments.find(item =>
+      item.source_url === part.sourceUrl && item.status === 'pending');
+    if (pendingAttachment && (!previous || previous.status === 'preparing')) {
+      // Keep the part retryable behind the live watermark, without a QQ request
+      // or the two-minute cooldown used for actual upload/preflight failures.
+      record(key,index,part.type,message,'preparing',{},context);
+      return 'deferred';
+    }
     if (previous?.status === 'failed_preflight'
       && Date.now() - Date.parse(previous.attempted_at) < 2 * 60_000) return 'deferred';
     if (previous?.status === 'rate_limited'
@@ -508,7 +525,10 @@ async function tick() {
             }
             continue;
           }
-          if (!liuyudong.readyForLive(message,sourceTime)) continue;
+          if (!liuyudong.readyForLive(message,sourceTime)) {
+            rememberPendingLiveImage(message,target.group_openid);
+            continue;
+          }
         }
         const outcome = await processMessage(message);
         if (outcome === 'accepted' || outcome === 'skipped_duplicate') advanceLiveWatermark(target.group_openid,message);
