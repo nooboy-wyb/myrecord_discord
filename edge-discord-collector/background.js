@@ -9,7 +9,8 @@ const requestedChannels = [
   {id:'1296438667438719028', label:'颜驰 饭碗警报', marker:'addedYanchiFanwanChannelV1'},
   {id:'1439232860014907412', label:'颜驰 视频解说', marker:'addedYanchiVideoChannelV1'},
   {id:'1222944235691708477', label:'柳玉东', marker:'addedLiuYudongChannelV1'},
-  {id:'1563418901075857428', label:'匿名博士', marker:'addedAnonymousDoctorChannelV1'}
+  {id:'1563418901075857428', label:'匿名博士', marker:'addedAnonymousDoctorChannelV1'},
+  {id:'1332650386720559105', label:'tia', marker:'addedTiaImagesChannelV1'}
 ];
 async function addRequestedChannelsOnce() {
   const data = await chrome.storage.local.get(['allowedChannels','channelLabels',...requestedChannels.map(item => item.marker)]);

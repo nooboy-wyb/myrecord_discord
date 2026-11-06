@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const tia = require('../scripts/qq_channels/tia/index.cjs');
+const image = {kind:'image',source_url:'https://cdn.discordapp.com/attachments/1332650386720559105/1/chart.png'};
+const video = {kind:'video',source_url:'https://cdn.discordapp.com/attachments/870537468896772126/2/video.mp4'};
+const split = value => value ? [value] : [];
+assert.deepEqual(tia.buildParts('【tia】','來都來了……',[video],split),[]);
+assert.deepEqual(tia.buildParts('【tia】','only text',[],split),[]);
+const mixed = tia.buildParts('【tia】','caption',[image,video],split);
+assert.deepEqual(mixed.map(part=>part.type),['text','image']);
+assert.equal(mixed[0].content,'【tia】\ncaption');
+assert.equal(mixed[1].sourceUrl,image.source_url);
+assert.equal(tia.buildParts('【tia】','No text',[image],split)[0].content,'【tia】');
+assert(!tia.isImage({...image,source_url:video.source_url}));
+assert(!tia.isImage({...image,source_url:'https://example.com/chart.png'}));
+console.log('tia forwards pictures with captions; video-only and text-only posts are skipped.');

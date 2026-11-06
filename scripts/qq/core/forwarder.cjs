@@ -6,6 +6,7 @@ const {saveDiagnostic} = require('../../collector_diagnostics.cjs');
 const yanchi = require('../../qq_channels/yanchi/index.cjs');
 const fengxun = require('../../qq_channels/fengxun/index.cjs');
 const liuyudong = require('../../qq_channels/liuyudong/index.cjs');
+const tia = require('../../qq_channels/tia/index.cjs');
 const {createManualRecovery} = require('./manual_recovery.cjs');
 const {decorateChannelLabel} = require('./channel_title_style.cjs');
 const alerts = require('./alerts.cjs');
@@ -81,6 +82,7 @@ function splitText(value, size = 1500) {
   return result;
 }
 function buildParts(channelId, heading, displayBody, images) {
+  if (channelId === tia.channelId) return tia.buildParts(heading,displayBody,images,splitText);
   const chunks = splitText(displayBody, 1400);
   if (channelId === liuyudong.channelId && images.length) {
     return [
