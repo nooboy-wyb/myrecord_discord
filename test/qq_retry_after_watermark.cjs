@@ -16,7 +16,7 @@ const retryKey = crypto.createHash('sha256').update(JSON.stringify([
 const retryable = new Set();
 const eligible = vm.runInNewContext(`${source.slice(start,end)}\nliveMessageEligible`,{
   crypto,Date,liuyudong:{channelId:'liu'},
-  state:{prepare:()=>({get:key=>retryable.has(key) ? {found:1} : undefined})},
+  state:{prepare:sql=>({get:key=>!sql.includes('skipped_attachment') && retryable.has(key) ? {found:1} : undefined})},
   liveWatermark:()=>({source_message_id:'1234567890123456799',
     source_timestamp:'2026-11-03T11:00:00Z'}),
   sourceTime:item=>Date.parse(item.source_timestamp),

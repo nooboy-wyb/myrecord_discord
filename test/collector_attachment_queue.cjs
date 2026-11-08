@@ -80,7 +80,7 @@ test('download failures persist retries, survive restart, and stop at a bounded 
   const {root,dbFor} = fixture(t);
   let clock = Date.parse('2026-11-06T10:00:00Z'),calls = 0;
   const events = [];
-  const options = {root,now:()=>clock,maxAttempts:2,retryDelays:[5000],
+  const options = {root,now:()=>clock,retryDelays:[5000],
     fetchImpl:async()=>{calls++;throw Error('private signed URL must not enter diagnostics');},onEvent:e=>events.push(e)};
   let queue = createAttachmentQueue(options);
   let db = dbFor();
@@ -89,15 +89,17 @@ test('download failures persist retries, survive restart, and stop at a bounded 
   assert.equal(calls,1);
   queue = createAttachmentQueue(options);queue.recover();
   await queue.runOnce();assert.equal(calls,1,'restart must honor the persisted retry deadline');
-  clock += 5000;await queue.runOnce();assert.equal(calls,2);
-  clock += 100000;await queue.runOnce();assert.equal(calls,2);
+  for (let attempt = 2; attempt <= 5; attempt++) {
+    clock += 5000;await queue.runOnce();assert.equal(calls,attempt);
+  }
+  clock += 100000;await queue.runOnce();assert.equal(calls,5);
   db = dbFor();
   try {
     assert.equal(db.prepare('SELECT status FROM discord_web_attachment_files').get().status,'failed');
-    assert.equal(db.prepare('SELECT attempts FROM discord_web_attachment_jobs').get().attempts,2);
+    assert.equal(db.prepare('SELECT attempts FROM discord_web_attachment_jobs').get().attempts,5);
     queue.enqueue(db,'2026-11-06',1,message('1568190318510088314',[image('unavailable')]));
   } finally { db.close(); }
-  await queue.runOnce();assert.equal(calls,2,'duplicate captures must not reset an exhausted retry loop');
+  await queue.runOnce();assert.equal(calls,5,'duplicate captures must not reset an exhausted retry loop');
   assert.equal(events.at(-1).code,'ATTACHMENT_DOWNLOAD_FAILED');
   assert(!JSON.stringify(events).includes('private'));
   assert(!JSON.stringify(events).includes('https:'));

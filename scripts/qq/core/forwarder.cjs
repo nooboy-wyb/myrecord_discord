@@ -229,6 +229,7 @@ function liveMessageEligible(groupOpenid, message, startupFloor) {
   const taskKey = crypto.createHash('sha256').update(JSON.stringify([
     groupOpenid,message.channel_id,message.source_message_id,message.content_sha256
   ])).digest('hex');
+  if (state.prepare("SELECT 1 FROM forward_attempts WHERE task_key=? AND status='skipped_attachment' LIMIT 1").get(taskKey)) return false;
   if (state.prepare(`SELECT 1 FROM forward_attempts WHERE task_key=?
     AND (status IN ('preparing','rate_limited') OR (status='failed_preflight'
       AND error NOT LIKE 'Original image format requires separate validation%'
@@ -274,7 +275,7 @@ function pendingMessages() {
         FROM discord_web_messages WHERE captured_at >= ? ORDER BY captured_at,id`).all(startAt);
       for (const message of messages) {
         if (!Number.isFinite(sourceTime(message))) continue;
-        const attachments = db.prepare(`SELECT source_url,local_path,status,error FROM discord_web_attachment_files WHERE message_id=?`).all(message.id);
+        const attachments = attachmentFiles(db,message.id);
         rows.push({...message, attachments, file});
       }
     } finally { db.close(); }
@@ -292,7 +293,7 @@ function recentMessages(channelId, limit) {
       for (const message of messages) {
         const old = bySourceId.get(message.source_message_id);
         if (old && old.captured_at >= message.captured_at) continue;
-        const attachments = db.prepare(`SELECT source_url,local_path,status,error FROM discord_web_attachment_files WHERE message_id=?`).all(message.id);
+        const attachments = attachmentFiles(db,message.id);
         bySourceId.set(message.source_message_id, {...message,attachments,file});
       }
     } finally { db.close(); }
@@ -322,7 +323,7 @@ function replayMessages(request) {
           content_sha256,body_raw,attachments_json,captured_at FROM discord_web_messages
           WHERE channel_id=? AND source_message_id=? AND content_sha256=?`).get(item.channel_id,item.source_message_id,item.content_sha256);
         if (message) {
-          const attachments = db.prepare('SELECT source_url,local_path,status,error FROM discord_web_attachment_files WHERE message_id=?').all(message.id);
+          const attachments = attachmentFiles(db,message.id);
           if (!found || message.captured_at > found.captured_at) found = {...message,attachments,file};
         }
       } finally { db.close(); }
@@ -331,6 +332,13 @@ function replayMessages(request) {
     messages.push(found);
   }
   return messages.sort((a,b) => sourceTime(a) - sourceTime(b));
+}
+function attachmentFiles(db, messageId) {
+  const hasJobs = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='discord_web_attachment_jobs'").get();
+  if (!hasJobs) return db.prepare('SELECT source_url,local_path,status,error FROM discord_web_attachment_files WHERE message_id=?').all(messageId);
+  return db.prepare(`SELECT f.source_url,f.local_path,f.status,f.error,j.status AS download_status,j.attempts AS download_attempts
+    FROM discord_web_attachment_files f LEFT JOIN discord_web_attachment_jobs j
+      ON j.message_id=f.message_id AND j.source_url=f.source_url WHERE f.message_id=?`).all(messageId);
 }
 function record(key, index, type, message, status, detail = {}, context = {}) {
   state.prepare(`INSERT INTO forward_attempts
@@ -376,6 +384,34 @@ async function processMessage(message, context = {}) {
   const parts = context.imageOnlyRepair
     ? images.map(item => ({type:'image',sourceUrl:item.source_url,content:'补图'}))
     : buildParts(message.channel_id,heading,displayBody,images);
+  if (state.prepare("SELECT 1 FROM forward_attempts WHERE task_key=? AND status='skipped_attachment' LIMIT 1").get(key)) return 'skipped_attachment';
+  const failedParts = parts.flatMap((part,index) => {
+    if (part.type !== 'image') return [];
+    const attachment = message.attachments.find(item => item.source_url === part.sourceUrl);
+    const previous = state.prepare('SELECT status FROM forward_attempts WHERE task_key=? AND part_index=?').get(key,index);
+    return attachment?.status === 'failed' && attachment.download_status === 'failed'
+      && (!previous || ['preparing','failed_preflight'].includes(previous.status))
+      ? [{index,attachment}] : [];
+  });
+  if (failedParts.length && !state.prepare("SELECT 1 FROM forward_attempts WHERE task_key=? AND status='unknown' LIMIT 1").get(key)) {
+    const failures = failedParts.map(({index,attachment}) => ({part_index:index,attempts:attachment.download_attempts,
+      reason:/^(HTTP \d{3}|attachment download timeout|attachment download failed|image too large)$/.test(attachment.error || '')
+        ? attachment.error : 'attachment download failed'}));
+    const error = `Attachment download attempts exhausted: ${JSON.stringify(failures)}`;
+    state.exec('BEGIN IMMEDIATE');
+    try {
+      for (const {index} of failedParts) record(key,index,'image',message,'skipped_attachment',{error},context);
+      state.prepare(`UPDATE forward_attempts SET status='skipped_attachment',error=?,attempted_at=?
+        WHERE task_key=? AND status IN ('preparing','failed_preflight')`).run(error,new Date().toISOString(),key);
+      state.exec('COMMIT');
+    } catch (failure) { state.exec('ROLLBACK'); throw failure; }
+    try {
+      saveDiagnostic({event_id:crypto.randomUUID(),at:Date.now(),code:'QQ_ATTACHMENT_SKIPPED',
+        channel_id:message.channel_id,source_message_id:message.source_message_id,detail:{failures}});
+    } catch (failure) { console.warn('QQ attachment skip diagnostic:',failure.message); }
+    console.warn(`QQ 附件下载已达失败上限，Discord ${message.source_message_id} 已记录并跳过，继续处理后续消息：${JSON.stringify(failures)}`);
+    return 'skipped_attachment';
+  }
   for (const [index, part] of parts.entries()) {
     const previous = state.prepare('SELECT status,attempted_at FROM forward_attempts WHERE task_key=? AND part_index=?').get(key,index);
     if (previous?.status === 'accepted') continue;
@@ -527,7 +563,8 @@ async function tick() {
             }
             continue;
           }
-          if (!liuyudong.readyForLive(message,sourceTime)) {
+          if (!liuyudong.readyForLive(message,sourceTime)
+            && !message.attachments.some(item => item.status === 'failed' && item.download_status === 'failed')) {
             rememberPendingLiveImage(message,target.group_openid);
             continue;
           }
