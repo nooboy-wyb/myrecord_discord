@@ -30,16 +30,49 @@ addRequestedChannelsOnce().catch(error => console.error('Channel setup:', error)
 let sending = false;
 let uploadWakeRequested = false;
 let captureRetryTimer;
+let captureWake;
+const captureConcurrency = 3;
 let queueMutation = Promise.resolve();
-function mutateQueue(change) {
+function mutateCaptureState(change) {
   const operation = queueMutation.then(async () => {
-    const {queue = []} = await chrome.storage.local.get('queue');
-    const result = change(queue);
-    await chrome.storage.local.set({queue});
+    const data = await chrome.storage.local.get(['token','queue','captureChannelRetries',
+      'captureLastChannel','captureRetryAt','captureRetryFailures','rejectedCaptures']);
+    const state = {queue:data.queue || [],retries:data.captureChannelRetries || {},
+      lastChannel:data.captureLastChannel || ''};
+    // Adopt the old global cooldown for its original head channel only.
+    const legacyChannel = state.queue[0]?.message.channel_id;
+    if (legacyChannel && Number(data.captureRetryAt || 0) > Date.now()
+        && !state.retries[legacyChannel]) {
+      state.retries[legacyChannel] = {retryAt:Number(data.captureRetryAt),
+        failures:Number(data.captureRetryFailures || 0)};
+    }
+    const patch = {};
+    const result = change(state,patch,data);
+    await chrome.storage.local.set({queue:state.queue,captureChannelRetries:state.retries,
+      captureLastChannel:state.lastChannel,captureRetryAt:0,captureRetryFailures:0,...patch});
     return result;
   });
   queueMutation = operation.catch(() => {});
   return operation;
+}
+function mutateQueue(change) {
+  return mutateCaptureState(state => change(state.queue));
+}
+function updateCaptureError(state, patch) {
+  const latest = Object.values(state.retries).filter(item => item.error)
+    .sort((a,b) => b.failedAt - a.failedAt)[0];
+  patch.lastError = latest?.error || '';
+  if (latest) patch.lastErrorAt = latest.failedAt;
+}
+function nextCapture(state, blocked, now) {
+  // Only each channel's first pending item can run, preserving its FIFO order.
+  const heads = [...new Set(state.queue.map(item => item.message.channel_id))];
+  const previous = heads.indexOf(state.lastChannel);
+  for (let offset = 1; offset <= heads.length; offset++) {
+    const channel = heads[(previous + offset) % heads.length];
+    if (blocked.has(channel) || Number(state.retries[channel]?.retryAt || 0) > now) continue;
+    return state.queue.find(item => item.message.channel_id === channel);
+  }
 }
 async function enqueue(message) {
   if (message.capture_trace?.scan_id) message = {...message,
@@ -65,69 +98,97 @@ function scheduleCaptureRetry(retryAt) {
 }
 async function flush() {
   uploadWakeRequested = true;
+  captureWake?.();
   if (sending) return;
   sending = true;
+  const active = new Map();
   try {
     while (true) {
-      // Remember wakeups that arrive while this storage read is pending.
       uploadWakeRequested = false;
-      const {token = '', queue = [], captureRetryAt = 0, captureRetryFailures = 0} =
-        await chrome.storage.local.get(['token','queue','captureRetryAt','captureRetryFailures']);
-      if (!token) return;
-      if (!queue.length) {
+      const batch = await mutateCaptureState((state, _patch, data) => {
+        const selected = [];
+        const blocked = new Set(active.keys());
+        if (data.token) while (active.size + selected.length < captureConcurrency) {
+          const item = nextCapture(state,blocked,Date.now());
+          if (!item) break;
+          selected.push(item);
+          state.lastChannel = item.message.channel_id;
+          blocked.add(state.lastChannel);
+        }
+        const retryAt = state.queue.filter(item => !blocked.has(item.message.channel_id))
+          .map(item => Number(state.retries[item.message.channel_id]?.retryAt || 0))
+          .filter(at => at > Date.now());
+        return {selected,token:data.token,retryAt:retryAt.length ? Math.min(...retryAt) : 0};
+      });
+      for (const item of batch.selected) {
+        const channel = item.message.channel_id;
+        const upload = uploadCapture(item,batch.token).catch(error => {
+          console.error('Capture upload:',error);
+        }).finally(() => {
+          active.delete(channel);
+          uploadWakeRequested = true;
+          captureWake?.();
+        });
+        active.set(channel,upload);
+      }
+      if (batch.retryAt) scheduleCaptureRetry(batch.retryAt);
+      if (!active.size) {
         if (uploadWakeRequested) continue;
         return;
       }
-      if (captureRetryAt > Date.now()) {
-        scheduleCaptureRetry(captureRetryAt);
-        return;
-      }
-      // Read a fresh head after every acknowledgement, including new arrivals.
-      const item = queue[0];
+      if (uploadWakeRequested) continue;
+      // A newly queued channel wakes a vacant slot without waiting for a slow upload.
       try {
-        const response = await fetch(ENDPOINT, {
-          method: 'POST', headers: {'Content-Type': 'application/json', 'X-Collector-Token': token},
-          body: JSON.stringify(item.message), signal:AbortSignal.timeout(30000)
-        });
-        if (response.status === 400) {
-          const detail = (await response.text()).slice(0,200);
-          await mutateQueue(current => {
-            const index = current.findIndex(x => x.key === item.key);
-            if (index >= 0) current.splice(index,1);
-          });
-          const {rejectedCaptures = []} = await chrome.storage.local.get('rejectedCaptures');
-          rejectedCaptures.push({channelId:item.message.channel_id,
-            sourceMessageId:item.message.source_message_id,error:detail,at:Date.now()});
-          await chrome.storage.local.set({rejectedCaptures:rejectedCaptures.slice(-100),
-            captureRetryAt:0,captureRetryFailures:0,
-            lastError:'消息 '+item.message.source_message_id+' 被本机拒收，请检查扩展诊断',lastErrorAt:Date.now()});
-          await queueDiagnostic('CAPTURE_REJECTED',{channel_id:item.message.channel_id,
-            source_message_id:item.message.source_message_id,error:detail});
-          continue;
-        }
-        if (!response.ok) throw new Error('HTTP '+response.status);
-        await mutateQueue(current => {
-          const index = current.findIndex(x => x.key === item.key);
-          if (index >= 0) current.splice(index,1);
-        });
-        if (captureRetryTimer != null) clearTimeout(captureRetryTimer);
-        captureRetryTimer = undefined;
-        await chrome.storage.local.set({lastSavedAt:Date.now(),lastError:'',
-          captureRetryAt:0,captureRetryFailures:0});
-      } catch (error) {
-        const previous = (await chrome.storage.local.get('lastError')).lastError || '';
-        const failures = Math.min(Number(captureRetryFailures) + 1,6);
-        const retryAt = Date.now() + Math.min(30000,1000 * 2 ** (failures - 1));
-        await chrome.storage.local.set({lastError:String(error),lastErrorAt:Date.now(),
-          captureRetryAt:retryAt,captureRetryFailures:failures});
-        if (previous !== String(error)) await queueDiagnostic('CAPTURE_UPLOAD_FAILED',{
-          channel_id:item.message.channel_id,source_message_id:item.message.source_message_id,
-          error:String(error)});
-        scheduleCaptureRetry(retryAt);
-        return;
+        await Promise.race([...active.values(),new Promise(resolve => {
+          captureWake = resolve;
+        })]);
+      } finally {
+        captureWake = undefined;
       }
     }
-  } finally { sending = false; }
+  } finally {
+    captureWake = undefined;
+    await Promise.allSettled([...active.values()]);
+    sending = false;
+    if (uploadWakeRequested) scheduleCaptureRetry(Date.now() + 1000);
+  }
+}
+async function uploadCapture(item, token) {
+  const channel = item.message.channel_id;
+  try {
+    const response = await fetch(ENDPOINT, {
+      method:'POST',headers:{'Content-Type':'application/json','X-Collector-Token':token},
+      body:JSON.stringify(item.message),signal:AbortSignal.timeout(30000)
+    });
+    const detail = await response.text();
+    if (response.status !== 400 && !response.ok) throw Error('HTTP '+response.status);
+    await mutateCaptureState((state, patch, data) => {
+      const index = state.queue.findIndex(row => row.key === item.key);
+      if (index >= 0) state.queue.splice(index,1);
+      delete state.retries[channel];
+      updateCaptureError(state,patch);
+      if (response.status === 400) {
+        patch.rejectedCaptures = [...(data.rejectedCaptures || []),{
+          channelId:channel,sourceMessageId:item.message.source_message_id,
+          error:detail.slice(0,200),at:Date.now()}].slice(-100);
+        patch.lastError = '消息 '+item.message.source_message_id+' 被本机拒收，请检查扩展诊断';
+        patch.lastErrorAt = Date.now();
+      } else patch.lastSavedAt = Date.now();
+    });
+    if (response.status === 400) await queueDiagnostic('CAPTURE_REJECTED',{
+      channel_id:channel,source_message_id:item.message.source_message_id,error:detail.slice(0,200)});
+  } catch (error) {
+    const changed = await mutateCaptureState((state, patch) => {
+      const previous = state.retries[channel];
+      const failures = Math.min(Number(previous?.failures || 0) + 1,6);
+      const retryAt = Date.now() + Math.min(30000,1000 * 2 ** (failures - 1));
+      state.retries[channel] = {failures,retryAt,error:String(error),failedAt:Date.now()};
+      updateCaptureError(state,patch);
+      return previous?.error !== String(error);
+    });
+    if (changed) await queueDiagnostic('CAPTURE_UPLOAD_FAILED',{
+      channel_id:channel,source_message_id:item.message.source_message_id,error:String(error)});
+  }
 }
 let refreshing = false;
 let alertSending = false;
