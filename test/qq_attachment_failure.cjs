@@ -40,7 +40,7 @@ function fixture(t) {
   const liuModule = {exports:{}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../scripts/qq_channels/liuyudong/index.cjs'),'utf8'),
     {module:liuModule,require:()=>fileSystem,Date});
-  const context = vm.createContext({crypto,path,Date,Buffer,state,liuyudong:liuModule.exports,
+  const context = vm.createContext({crypto,path,Date,Buffer,state,setImmediate,liuyudong:liuModule.exports,
     target:{group_openid:'primary'},running:false,online:true,paused:false,
     root:'test',plannerStatus:{},planTelegram:()=>({enabled:0}),
     fs:fileSystem,
@@ -119,6 +119,45 @@ test('temporary archive contention retries planning without permanently pausing 
   await api.tick();
   assert.equal(context.plannerStatus.discord.ok,true);
   assert.deepEqual(requests,['messages']);
+});
+
+test('archive reads yield to gateway callbacks before processing the whole archive',async()=>{
+  const messages = Array.from({length:600},(_,index)=>({id:index}));
+  let processed = 0,processedAtCallback = null;
+  class FixtureDatabase {
+    exec() {}
+    prepare() {return {all:()=>messages};}
+    close() {}
+  }
+  const context = vm.createContext({DatabaseSync:FixtureDatabase,setImmediate,
+    state:{prepare:()=>({get:()=>({value:'2026-11-01T00:00:00Z'})})},
+    sourceFiles:()=>['fixture'],sourceTime:()=>0,
+    attachmentFiles:()=>{
+      if (++processed === 1) setImmediate(()=>{processedAtCallback=processed;});
+      return [];
+    }});
+  const read = vm.runInContext(section('async function pendingMessages()','function recentMessages(')+'\npendingMessages',context);
+  assert.equal((await read()).length,messages.length);
+  assert(processedAtCallback > 0 && processedAtCallback < messages.length);
+});
+
+test('bulk DC planning yields to gateway callbacks while excluding overlapping ticks',async t=>{
+  const {api,context,messages} = fixture(t);
+  messages.push(...Array.from({length:600},(_,index)=>message(1000+index)));
+  let planned = 0,plannedAtCallback = null,wasRunning = false;
+  context.primaryAcceptsMessage = ()=>{
+    if (++planned === 1) setImmediate(()=>{
+      plannedAtCallback=planned;
+      wasRunning=context.running;
+      api.tick();
+    });
+    return false;
+  };
+  await api.tick();
+  assert(plannedAtCallback > 0 && plannedAtCallback < messages.length);
+  assert.equal(wasRunning,true);
+  assert.equal(planned,messages.length);
+  assert.equal(context.running,false);
 });
 
 test('restart retains uncertain segments and drains the next message without retrying them',async t=>{

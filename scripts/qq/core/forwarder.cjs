@@ -273,8 +273,9 @@ function messageHeading(message, context = {}) {
   const speaker = message.channel_id === '1265882617530814535' ? `｜${speakerName(message.author_display)}` : '';
   return `【${decorateChannelLabel(message.channel_id,label)}${history}${speaker}】\n${sourceTimeLabel(message)}`;
 }
-function pendingMessages() {
+async function pendingMessages() {
   const rows = [];
+  let scannedMessages = 0;
   const startAt = state.prepare('SELECT value FROM forward_meta WHERE key=?').get('start_at').value;
   for (const file of sourceFiles()) {
     const db = new DatabaseSync(file, {readOnly: true});
@@ -283,11 +284,13 @@ function pendingMessages() {
       const messages = db.prepare(`SELECT id,channel_id,channel_name,author_display,source_message_id,source_timestamp,content_sha256,body_raw,attachments_json,captured_at
         FROM discord_web_messages WHERE captured_at >= ? ORDER BY captured_at,id`).all(startAt);
       for (const message of messages) {
+        if (++scannedMessages % 100 === 0) await new Promise(resolve => setImmediate(resolve));
         if (!Number.isFinite(sourceTime(message))) continue;
         const attachments = attachmentFiles(db,message.id);
         rows.push({...message, attachments, file});
       }
     } finally { db.close(); }
+    await new Promise(resolve => setImmediate(resolve));
   }
   return rows.sort((a, b) => sourceTime(a) - sourceTime(b)
     || String(a.source_message_id).localeCompare(String(b.source_message_id)));
@@ -588,7 +591,9 @@ async function tick() {
               AND b.origin='repair' AND b.status='accepted' AND b.attempted_at>a.attempted_at)`)
         .all(route.group_openid).map(row => row.source_message_id))]));
     const startupFloor = Date.parse(state.prepare('SELECT value FROM forward_meta WHERE key=?').get('start_at').value) - 120000;
-    for (const message of pendingMessages()) {
+    let plannedMessages = 0;
+    for (const message of await pendingMessages()) {
+      if (++plannedMessages % 100 === 0) await new Promise(resolve => setImmediate(resolve));
       if (!paused && primaryAcceptsMessage(control,message)
         && liveMessageEligible(target.group_openid,message,startupFloor)) {
         if (message.channel_id === liuyudong.channelId) {
