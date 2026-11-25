@@ -4,7 +4,7 @@ const {randomUUID} = require('node:crypto');
 
 const appId = process.env.QQ_BOT_APP_ID?.trim();
 const secret = process.env.QQ_BOT_APP_SECRET?.trim();
-const dataDir = path.resolve(__dirname, '..', '..', '..', 'data');
+const dataDir = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', '..', 'data'));
 const additionalRoutesPath = path.join(dataDir, 'qq-additional-routes.json');
 const alerts = require('./alerts.cjs');
 if (!/^\d+$/.test(appId || '') || !secret) {

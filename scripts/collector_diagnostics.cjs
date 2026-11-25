@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {DatabaseSync} = require('node:sqlite');
 
-const defaultFile = path.resolve(__dirname,'../data/collector-diagnostics.sqlite');
+const defaultFile = path.join(process.env.MUSE_DATA_DIR || path.resolve(__dirname,'../data'),'collector-diagnostics.sqlite');
 
 function saveDiagnostic(event, file = defaultFile) {
   if (!event || typeof event !== 'object' ||
@@ -20,6 +20,7 @@ function saveDiagnostic(event, file = defaultFile) {
   fs.mkdirSync(path.dirname(file),{recursive:true});
   const db = new DatabaseSync(file);
   try {
+    db.exec('PRAGMA busy_timeout=5000');
     db.exec(`CREATE TABLE IF NOT EXISTS collector_diagnostic_events (
       event_id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL,
       code TEXT NOT NULL, channel_id TEXT, tab_id INTEGER, incident_at INTEGER,
@@ -48,6 +49,7 @@ function recoveryAlertAlreadyHandled(event, file = defaultFile) {
   if (!fs.existsSync(file)) return false;
   const db = new DatabaseSync(file, {readOnly:true});
   try {
+    db.exec('PRAGMA busy_timeout=5000');
     const rows = db.prepare(`SELECT code,detail_json FROM collector_diagnostic_events
       WHERE channel_id=? AND incident_at=? AND code IN ('ALERT_ACCEPTED','RECOVERY_SCAN_RESTORED')`)
       .all(event.channelId,event.requestedAt);

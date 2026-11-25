@@ -2,8 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {DatabaseSync} = require('node:sqlite');
+const {acquireLock} = require('../qq/core/process_lock.cjs');
 
-const data = path.resolve(__dirname, '..', '..', 'data');
+const data = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', 'data'));
 
 function archivedMessage(archive, audit, expected) {
   const row = archive.prepare('SELECT * FROM telegram_messages WHERE id=?').get(expected.row_id);
@@ -12,7 +13,8 @@ function archivedMessage(archive, audit, expected) {
     || ['body_raw', 'source_timestamp', 'content_sha256', 'edit_timestamp', 'grouped_id']
       .some(field => row[field] !== expected[field])) throw Error('Archive differs from verified audit');
   const payload = JSON.parse(row.payload_json);
-  if ((payload.topic_id || null) !== (audit.topic_id ? String(audit.topic_id) : null)
+  if ((audit.topic_id != null && payload.topic_id !== String(audit.topic_id))
+    || (Object.hasOwn(expected,'topic_id') && payload.topic_id !== expected.topic_id)
     || payload.body_raw !== row.body_raw || payload.source_timestamp !== row.source_timestamp
     || JSON.stringify(payload.attachments) !== JSON.stringify(expected.attachments)) {
     throw Error('Archive payload differs from verified audit');
@@ -75,12 +77,12 @@ async function main() {
   const archive = new DatabaseSync(path.join(data, 'telegram', 'archive.sqlite'), {readOnly:true});
   const state = new DatabaseSync(path.join(data, 'qq-forward.sqlite'));
   state.exec('PRAGMA busy_timeout=15000');
-  let lock;
-  const lockPath = path.join(data, 'telegram', 'qq-sample.lock');
+  let release;
+  const lockPath = path.join(data, 'qq-sender.lock');
   try {
     if (mode === '--send') {
       if (!process.env.QQ_BOT_APP_SECRET) throw Error('Load encrypted QQ credentials before sending');
-      lock = fs.openSync(lockPath, 'wx');
+      release = acquireLock(lockPath);
     }
     const plan = [];
     for (const selector of selectors) {
@@ -154,7 +156,7 @@ async function main() {
   } finally {
     archive.close();
     state.close();
-    if (lock !== undefined) { fs.closeSync(lock); fs.unlinkSync(lockPath); }
+    if (release) release();
   }
 }
 

@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const dataDir = path.resolve(__dirname, '..', '..', '..', 'data');
+const dataDir = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', '..', 'data'));
 const recipientFile = path.join(dataDir, 'qq-alert-recipient.json');
 const bindingFile = path.join(dataDir, 'qq-alert-binding.json');
 const appId = process.env.QQ_BOT_APP_ID?.trim();

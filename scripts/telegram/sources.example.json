@@ -1,0 +1,7 @@
+{
+  "sources": [
+    {"peer_id":"-1003432435785","topic_id":null,"target":"TG1","enabled":false,"enabled_at":"SET_ISO_TIME_WITH_TIMEZONE"},
+    {"peer_id":"-1003452957222","topic_id":null,"target":"TG1","enabled":false,"enabled_at":"SET_ISO_TIME_WITH_TIMEZONE"},
+    {"peer_id":"-1004472038576","topic_id":13613,"topic_title":"ye-koi盘中状态更新","target":"TG1","enabled":false,"enabled_at":"SET_ISO_TIME_WITH_TIMEZONE"}
+  ]
+}

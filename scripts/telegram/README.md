@@ -1,6 +1,6 @@
 # Telegram 登录与入库验证
 
-采集入口是项目根目录下的 `scripts/start_telegram.ps1`，验证账号授权、频道读取、SQLite 归档和图片落盘。采集不依赖 Telegram 网页或 Desktop，也不会自动发送 QQ；单条 QQ 样例使用独立命令。
+采集入口是项目根目录下的 `scripts/start_telegram.ps1`，验证账号授权、频道读取、SQLite 归档和图片落盘。采集不依赖 Telegram 网页或 Desktop，采集进程自身不发送 QQ。持续采集使用 `-Action Monitor`，独立 QQ 进程消费归档；配置、启动和审计见[进程拆分说明](../../docs/collector-processes.md)。
 
 ## 首次配置与登录
 
@@ -67,4 +67,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_telegram.ps1
 node scripts/telegram/send_qq_history.cjs TG1 selected-check-20261125T145422.json --preview -1003432435785:all -1003452957222:all -1004472038576:13613
 ```
 
-按源消息时间顺序发送，标题保留频道/话题及“历史补发”，第二行显示原消息北京时间。图片先核对 SHA-256，使用现有 QQ 原图上传及发送逻辑。文字、图片共用每群至少两秒间隔；此前全部接受的源消息跳过，存在不完整或不确定发送记录时拒绝整批重试。逐条结果与 QQ 平台消息 ID 写入 `qq-forward.sqlite`，独立批次审计保存在 `data/telegram/audits/qq-history-*.json`。此命令是一次性历史发送，不启动持续采集或自动转发。
+按源消息时间顺序发送，标题保留频道/话题及“历史补发”，第二行显示原消息北京时间。图片先核对 SHA-256，使用现有 QQ 原图上传及发送逻辑。文字、图片共用每群至少两秒间隔；此前全部接受的源消息跳过，存在不完整或不确定发送记录时拒绝整批重试。逐条结果与 QQ 平台消息 ID 写入 `qq-forward.sqlite`，独立批次审计保存在 `data/telegram/audits/qq-history-*.json`。此命令是一次性历史发送，不启动持续采集或自动转发。`--send` 与常驻发送器共用锁，需先停止常驻 QQ 进程；`--preview` 可在其运行时使用。

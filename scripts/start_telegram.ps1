@@ -1,11 +1,12 @@
 param(
-    [ValidateSet('Setup', 'Configure', 'Login', 'Status', 'Channels', 'Probe', 'Watch', 'History')]
+    [ValidateSet('Setup', 'Configure', 'Login', 'Status', 'Channels', 'Probe', 'Watch', 'History', 'Monitor')]
     [string]$Action = 'Status',
     [string]$Channel,
     [ValidateRange(1, 1000)][int]$Limit = 5,
     [ValidateRange(0, 2147483647)][int]$Seconds = 60,
     [ValidateRange(1, 720)][int]$Hours = 24,
     [string]$Until,
+    [string]$Config,
     [int]$Topic,
     [ValidateSet('qr', 'phone')][string]$LoginMethod = 'qr',
     [string]$Proxy,
@@ -13,7 +14,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$dataDirectory = Join-Path $projectRoot 'data\telegram'
+$dataRoot = if ($env:MUSE_DATA_DIR) { $env:MUSE_DATA_DIR } else { Join-Path $projectRoot 'data' }
+$dataDirectory = Join-Path $dataRoot 'telegram'
 $runtime = Join-Path $dataDirectory 'runtime\Scripts\python.exe'
 $entryPoint = Join-Path $PSScriptRoot 'telegram\collector.py'
 [IO.Directory]::CreateDirectory((Join-Path $dataDirectory 'tmp')) | Out-Null
@@ -55,6 +57,11 @@ try {
     $telegramArguments += @('--limit', [string]$Limit)
     if ($Channel) { $telegramArguments += @('--channel', $Channel) }
     if ($Action -eq 'Watch') { $telegramArguments += @('--seconds', [string]$Seconds) }
+    if ($Action -eq 'Monitor') {
+        if (-not $PSBoundParameters.ContainsKey('Seconds')) { $Seconds = 0 }
+        $telegramArguments += @('--seconds', [string]$Seconds)
+        if ($Config) { $telegramArguments += @('--config', $Config) }
+    }
     if ($Action -eq 'History') {
         $telegramArguments += @('--hours', [string]$Hours)
         if ($Until) { $telegramArguments += @('--until', $Until) }

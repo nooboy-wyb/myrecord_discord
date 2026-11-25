@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const util = require('node:util');
 
-const logDir = process.env.MUSE_COLLECTOR_LOG_DIR || path.resolve(__dirname, '../data/logs');
+const logDir = process.env.MUSE_COLLECTOR_LOG_DIR || path.join(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '../data'),'logs');
+const role = process.env.MUSE_LOG_ROLE || 'collector';
 fs.mkdirSync(logDir, {recursive:true});
 const formatter = new Intl.DateTimeFormat('sv-SE', {
   timeZone:'Asia/Shanghai', year:'numeric', month:'2-digit', day:'2-digit',
@@ -11,7 +12,7 @@ const formatter = new Intl.DateTimeFormat('sv-SE', {
 function append(level, message) {
   try {
     const stamp = formatter.format(new Date());
-    const file = path.join(logDir, `collector-${stamp.slice(0, 10)}.log`);
+    const file = path.join(logDir, `${role}-${stamp.slice(0, 10)}.log`);
     for (const line of String(message).split(/\r?\n/)) {
       if (line) fs.appendFileSync(file, `[${stamp} +08:00] ${level} ${line}\n`, 'utf8');
     }

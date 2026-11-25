@@ -11,7 +11,8 @@ if ($settings.ProxyEnable -eq 1 -and $settings.ProxyServer) {
     $env:NO_PROXY = '127.0.0.1,localhost'
     Write-Host "Using Windows proxy: $address"
 }
-$logDir = Join-Path $PSScriptRoot '..\data\logs'
+$dataRoot = if ($env:MUSE_DATA_DIR) { $env:MUSE_DATA_DIR } else { Join-Path $PSScriptRoot '..\data' }
+$logDir = Join-Path $dataRoot 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $logEncoding = New-Object System.Text.UTF8Encoding($false)
 function Write-CollectorLog([string]$text) {

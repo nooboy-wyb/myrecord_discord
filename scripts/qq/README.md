@@ -2,15 +2,20 @@
 
 群消息发送按目标群分别保持至少 2 秒间隔；同一群的文字分段和图片消息共用该间隔。明确限频拒绝仍冷却两分钟后重试。
 
+当前 DC 采集、TG 采集和 QQ 发送分为三个独立进程，启动与审计见[进程拆分说明](../../docs/collector-processes.md)。QQ 单独运行 `scripts/start_qq_sender.ps1`；重启发送器不会停止两个采集器。旧 `selftest` 手动发送/修复命令仍须先停常驻 QQ 发送器，再执行定向操作。
+
 熬鹰实盘频道 `1571167749558902885` 与熬鹰 `1381176601802440744` 同走群 1 的通用转发和去重规则。已接受的分段不重发，两个频道分别维护发布时间进度，不跨频道合并同文消息；新频道在远端 `data/qq-forward-controls.json` 设置独立启用时间。扩展 v0.2.61 重新加载后自动加入采集列表，须打开熬鹰实盘频道页；转发器无需重启。
 
 tia 频道 `1332650386720559105` 单独使用 `../qq_channels/tia/` 规则，仅向群 1 转发含图片的消息及其配文；纯视频、视频外链和纯文字消息跳过。视频附件不上传、不发送，混合消息只保留图片。新增时在远程 `data/qq-forward-controls.json` 设置该频道独立启用时间，避免自动补发旧消息。扩展 v0.2.59 会自动加入 tia，需在 Edge 重新加载扩展并打开频道页。
 
 QQ Gateway 收到服务器 `op:7` 后立即停止旧连接的心跳并重连，使用内存中的会话和最新序号发送 `op:6` 恢复；收到 `RESUMED` 后恢复在线状态。会话失效 `op:9`（不可恢复）或关闭码 `4006/4007/4009` 时清除会话，重新发送 `op:2` 鉴权。服务器直接关闭连接而未收到 `op:7` 时仍等待 5 秒重试，连接 API 失败等待 10 秒。握手 30 秒未就绪会重试。
 
-心跳周期使用服务器 Hello 的 `heartbeat_interval`，每次发送 `op:1` 和收到 `op:11` 确认都写入运行日志；到下一次心跳仍未收到确认时立即重连。日志记录随机连接编号、握手模式、心跳往返时间、收发数量、连接时长、在线时长及恢复耗时，不记录令牌或会话 ID。`op:7` 轮换仍可能定期发生，验证重点是收到通知后主动恢复、心跳确认正常以及恢复耗时；只有长连接实际运行后才能确认平台行为。修改 `core/gateway.cjs` 后需要重启采集服务加载，刷新 Edge 扩展不会加载这份 Node 代码。
+心跳周期使用服务器 Hello 的 `heartbeat_interval`，每次发送 `op:1` 和收到 `op:11` 确认都写入运行日志；到下一次心跳仍未收到确认时立即重连。日志记录随机连接编号、握手模式、心跳往返时间、收发数量、连接时长、在线时长及恢复耗时，不记录令牌或会话 ID。`op:7` 轮换仍可能定期发生，验证重点是收到通知后主动恢复、心跳确认正常以及恢复耗时；只有长连接实际运行后才能确认平台行为。修改 `core/gateway.cjs` 后需要重启 QQ 发送进程加载，刷新 Edge 扩展不会加载这份 Node 代码。
 
-- `core/forwarder.cjs`：通用 Discord → QQ 路由、消息组装、发送与状态记录。
+- `sender.cjs`：独立 QQ 进程，提供 Gateway、健康接口和浏览器转发控制接口。
+- `core/forwarder.cjs`：通用 DC/TG → QQ 路由、消息组装、发送与状态记录。
+- `core/outbox.cjs`：持久待发队列、重启恢复和未知结果隔离。
+- `core/telegram_source.cjs`：按 TG 来源、话题和启用时间规划待发消息。
 - `core/manual_recovery.cjs`：网页手动历史补发的预览、提交、状态与取消；自动转发不依赖其按钮状态。
 - `core/gateway.cjs`：QQ Gateway 连接及群消息事件接收。
 - `core/alerts.cjs`：私聊绑定及 QQ 发送失败告警。
@@ -41,7 +46,7 @@ QQ 私聊告警：启动服务后，控制台会显示一次性「绑定告警 �
 
 绑定后手动验证一次主动私聊：`powershell -ExecutionPolicy Bypass -File scripts/qq/selftest/send_alert_test.ps1`。
 
-手动保持服务运行：在自己的独立 PowerShell 窗口先运行 `powershell -ExecutionPolicy Bypass -File "C:\Users\Administrator\Documents\ChatGPT\muse\scripts\stop_discord_collector.ps1"` 停止现有隐藏实例，再运行 `powershell -NoExit -ExecutionPolicy Bypass -File "C:\Users\Administrator\Documents\ChatGPT\muse\scripts\start_discord_qq.ps1"`。保留或最小化该窗口，关闭窗口即停止服务。启动时应看到 `Discord collector server ... listening` 和 `机器人已登录 QQ Gateway`；若出现 `EADDRINUSE`，说明 8765 仍被占用。仅打开 Discord 扩展并不会启动本地服务。
+手动保持服务运行：DC 使用 `scripts/start_discord_collector.ps1`，QQ 使用 `scripts/start_qq_sender.ps1`，分别保留终端窗口。兼容命令 `scripts/start_discord_qq.ps1` 会后台启动独立 QQ 进程再运行 DC；关闭 DC 窗口后 QQ 仍可能继续运行，需用 `scripts/stop_qq_sender.ps1` 单独停止。初次迁移必须先停止旧的混合进程。若出现 `EADDRINUSE`，检查对应的 8765/8766 端口；仅打开 Discord 扩展不会启动本地服务。
 
 采集与 QQ 转发的控制台输出会同时写入 `data/logs/collector-YYYY-MM-DD.log`，按 Windows 本地日期分文件，每行附时间。正常退出与异常退出都记录 Node 退出码；日志从下次启动服务起生效。查看最近记录可运行 `Get-Content .\data\logs\collector-$(Get-Date -Format yyyy-MM-dd).log -Tail 50`。日志可能包含消息 ID、频道名称和发送错误，按项目数据保护。
 

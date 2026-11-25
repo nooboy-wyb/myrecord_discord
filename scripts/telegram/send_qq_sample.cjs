@@ -1,8 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {DatabaseSync} = require('node:sqlite');
+const {acquireLock} = require('../qq/core/process_lock.cjs');
 
-const data = path.resolve(__dirname, '..', '..', 'data');
+const data = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', 'data'));
 
 async function main() {
   const [name, peerId, topicId, messageId, mode] = process.argv.slice(2);
@@ -56,8 +57,7 @@ async function main() {
     return;
   }
   if (!process.env.QQ_BOT_APP_SECRET) throw Error('Load encrypted bot credentials before sending');
-  const lockPath = path.join(data, 'telegram', 'qq-sample.lock');
-  const lock = fs.openSync(lockPath, 'wx');
+  const release = acquireLock(path.join(data,'qq-sender.lock'));
   const state = new DatabaseSync(path.join(data, 'qq-forward.sqlite'));
   try {
     const previous = state.prepare(`SELECT status,platform_message_id FROM forward_attempts
@@ -76,8 +76,7 @@ async function main() {
       || !attempts[0].platform_message_id) throw Error('Sample was not confirmed accepted; do not retry automatically');
   } finally {
     state.close();
-    fs.closeSync(lock);
-    fs.unlinkSync(lockPath);
+    release();
   }
 }
 

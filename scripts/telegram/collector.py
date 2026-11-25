@@ -137,8 +137,13 @@ async def save_message(client, archive, entity, message):
     for attachment in archive.attachment_rows(row_id):
         if attachment["kind"] != "image":
             continue
-        if attachment["status"] == "saved" and Path(attachment["local_path"]).is_file():
-            continue
+        if attachment["status"] == "saved" and attachment["local_path"]:
+            try:
+                with Path(attachment["local_path"]).open("rb") as saved_file:
+                    if hashlib.file_digest(saved_file, "sha256").hexdigest() == attachment["sha256"]:
+                        continue
+            except OSError:
+                pass
         if attachment["expected_size"] and attachment["expected_size"] > 25_000_000:
             archive.attachment_result(attachment["id"], "skipped_size", error="Image exceeds 25 MB capture limit")
             continue
@@ -223,6 +228,11 @@ async def run(args):
         return 0
     client = create_client(folder)
     try:
+        if args.action == "monitor":
+            from monitor import monitor
+
+            await monitor(client, folder, args, save_message, normalize, resolve_channel)
+            return 0
         await asyncio.wait_for(client.connect(), timeout=25)
         if args.action == "login":
             await login(client, folder, args.login_method)
@@ -261,7 +271,8 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Telegram login and SQLite archive validation; QQ forwarding is disabled")
-    parser.add_argument("action", choices=["configure", "login", "status", "dialogs", "probe", "watch", "history"])
+    parser.add_argument("action", choices=["configure", "login", "status", "dialogs", "probe", "watch", "history", "monitor"])
+    parser.add_argument("--config", type=Path, help="Selected source configuration for monitor")
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).resolve().parents[2] / "data" / "telegram")
     parser.add_argument("--channel", help="Selected signed peer_id from the dialogs command")
     parser.add_argument("--limit", type=int, default=5, help="probe/dialogs cap; history scans the entire time window")

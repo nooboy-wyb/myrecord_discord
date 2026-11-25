@@ -2,6 +2,8 @@
 
 > Discord 频道已有独立的 [Edge 网页采集与本机原图归档](docs/discord-ocr-architecture.md)；旧截图 OCR 流程仍可用于历史样本。市场预警 Worker 与 Discord 归档目前互不连接。
 
+DC 采集、TG 采集与共享 QQ Bot 发送已按三个进程组织；独立启动、配置和本地测试见[进程拆分说明](docs/collector-processes.md)。
+
 Cloudflare Worker 每分钟并行检查黄金 XAU/USD、BTC/USD 和美股 SNDK。触及设定的下限或上限时，通过 AstrBot HTTP API 分别向微信、QQ 推送。每个方向触发一次，回到区间后重新布防；某个渠道投递失败会重试该渠道。
 
 ## 数据源和时效

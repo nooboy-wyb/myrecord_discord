@@ -9,11 +9,13 @@ const liuyudong = require('../../qq_channels/liuyudong/index.cjs');
 const tia = require('../../qq_channels/tia/index.cjs');
 const {createManualRecovery} = require('./manual_recovery.cjs');
 const {decorateChannelLabel} = require('./channel_title_style.cjs');
+const {createOutbox} = require('./outbox.cjs');
+const {planTelegram,telegramAllowed} = require('./telegram_source.cjs');
 const alerts = require('./alerts.cjs');
 const exchangeChannelId = '1265882617530814535';
 const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId]);
 
-const root = path.resolve(__dirname, '..', '..', '..', 'data');
+const root = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', '..', 'data'));
 const target = JSON.parse(fs.readFileSync(path.join(root, 'qq-group-openid.json'), 'utf8'));
 const additionalRoutesFile = path.join(root, 'qq-additional-routes.json');
 const controlsFile = path.join(root, 'qq-forward-controls.json');
@@ -71,6 +73,7 @@ let online = false;
 let accessToken = null;
 let tokenExpiresAt = 0;
 const reportedUnconfirmed = new Set();
+const plannerStatus = {discord:{},telegram:{}};
 function pauseGroup(groupOpenid) {
   if (groupOpenid === target.group_openid) paused = true;
   else pausedGroups.add(groupOpenid);
@@ -115,9 +118,13 @@ async function token() {
 async function post(endpoint, payload, groupOpenid = target.group_openid) {
   const accessToken = await token();
   if (endpoint === 'messages') {
-    const wait = Math.max(0,Number(lastMessageAttemptAt.get(groupOpenid) || 0) + messageSpacingMs - Date.now());
+    const savedAttempt = state.prepare('SELECT value FROM forward_meta WHERE key=?').get(`group_attempt:${groupOpenid}`);
+    const previousAt = Math.max(Number(lastMessageAttemptAt.get(groupOpenid) || 0),Number(savedAttempt?.value || 0));
+    const wait = Math.max(0,previousAt + messageSpacingMs - Date.now());
     if (wait) await new Promise(resolve => setTimeout(resolve,wait));
     lastMessageAttemptAt.set(groupOpenid,Date.now());
+    state.prepare(`INSERT INTO forward_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .run(`group_attempt:${groupOpenid}`,String(Date.now()));
   }
   const response = await fetch(`https://api.bot.qq.com/v2/groups/${encodeURIComponent(groupOpenid)}/${endpoint}`, {
     method: 'POST',
@@ -368,6 +375,12 @@ async function processMessage(message, context = {}) {
   if (Date.now() < Number(groupCooldownUntil.get(groupOpenid) || 0)) return 'deferred';
   const isolateUnknown = groupOpenid !== target.group_openid || message.channel_id === liuyudong.channelId;
   const key = crypto.createHash('sha256').update(JSON.stringify([groupOpenid,message.channel_id,message.source_message_id,message.content_sha256])).digest('hex');
+  if (!context.history && !context.replayRequestId && !context.imageRepair && !context.confirmedRetry
+    && state.prepare(`SELECT 1 FROM forward_attempts WHERE group_openid=? AND source_message_id=?
+      AND task_key<>? AND status='unknown' LIMIT 1`).get(groupOpenid,message.source_message_id,key)) {
+    if (!isolateUnknown) pauseGroup(groupOpenid);
+    return 'unknown';
+  }
   const fengxunResult = message.channel_id === fengxun.channelId
     ? fengxun.beforeSend(state, key, message, groupOpenid, sourceTime) : null;
   if (fengxunResult?.skip) return 'skipped_duplicate';
@@ -517,9 +530,29 @@ async function processMessage(message, context = {}) {
 const manualRecovery = createManualRecovery({state,target,additionalChannelIds,additionalTargets,sourceFiles,sourceTime,
   replayMessages,processMessage,isOnline:() => online,
   isPaused:groupOpenid => groupOpenid === target.group_openid ? paused : pausedGroups.has(groupOpenid),pauseGroup});
+const outbox = createOutbox({state,send:processMessage,
+  allowed:(message,context) => {
+    if (!online) return false;
+    if (context.telegram) {
+      try { return !pausedGroups.has(context.group_openid) && telegramAllowed(root,message,context); } catch { return false; }
+    }
+    if (context.group_openid === target.group_openid) return !paused && primaryAcceptsMessage(primaryControl(),message);
+    return !pausedGroups.has(context.group_openid) && additionalTargets().some(route =>
+      route.group_openid === context.group_openid && routeAcceptsMessage(route,message));
+  },
+  onAccepted:(message,context) => advanceLiveWatermark(context.group_openid,message)});
+function health() {
+  const monitorFile = path.join(root,'telegram','monitor-status.json');
+  let telegramCollector = null;
+  try { telegramCollector = JSON.parse(fs.readFileSync(monitorFile,'utf8')); } catch {}
+  return {role:'qq-sender',online,running,planners:plannerStatus,outbox:outbox.status(),
+    telegram_collector:telegramCollector,at:new Date().toISOString()};
+}
 async function tick() {
-  if (running || !online) return;
+  if (running) return;
   running = true;
+  try { plannerStatus.telegram = {...planTelegram(root,outbox.enqueue,outbox.terminal),at:new Date().toISOString()}; }
+  catch (error) { plannerStatus.telegram = {error:error.message,at:new Date().toISOString()}; }
   try {
     const routes = additionalTargets();
     const control = primaryControl();
@@ -570,8 +603,7 @@ async function tick() {
             continue;
           }
         }
-        const outcome = await processMessage(message);
-        if (outcome === 'accepted' || outcome === 'skipped_duplicate') advanceLiveWatermark(target.group_openid,message);
+        outbox.enqueue(message,{group_openid:target.group_openid});
       }
       for (const route of routes) {
         if (pausedGroups.has(route.group_openid)) continue;
@@ -579,12 +611,10 @@ async function tick() {
           || !liveMessageEligible(route.group_openid,message,startupFloor)) continue;
         if (unresolvedAdditional.get(route.group_openid).has(message.source_message_id)
           || repairedAdditional.get(route.group_openid).has(message.source_message_id)) continue;
-        const outcome = await processMessage(message,{group_openid:route.group_openid});
-        if (outcome === 'unknown') unresolvedAdditional.get(route.group_openid).add(message.source_message_id);
-        if (outcome === 'accepted' || outcome === 'skipped_duplicate') advanceLiveWatermark(route.group_openid,message);
+        outbox.enqueue(message,{group_openid:route.group_openid});
       }
     }
-    if (!paused && control.primary_enabled !== false) {
+    if (online && !paused && control.primary_enabled !== false) {
       const request = state.prepare("SELECT * FROM replay_requests WHERE status='pending' AND (mode IS NULL OR mode='legacy') ORDER BY id LIMIT 1").get();
       if (request) {
         const messages = replayMessages(request);
@@ -601,17 +631,22 @@ async function tick() {
         }
       }
     }
-    await manualRecovery.processNext();
+    if (online) await manualRecovery.processNext();
+    plannerStatus.discord = {ok:true,at:new Date().toISOString()};
   }
   catch (error) {
     paused = true;
+    plannerStatus.discord = {error:error.message,at:new Date().toISOString()};
     console.error(`QQ 转发暂停：${error.message}`);
     alerts.notify(`tick:${error.message}`,`【QQ 转发告警】群 1 转发暂停：${error.message}。请检查本地服务日志。`);
   }
+  try { if (online) await outbox.drain(); }
+  catch (error) { console.error(`QQ 待发队列处理失败：${error.message}`); }
   finally { running = false; }
 }
 function start() {
   if (!secret) throw Error('QQ_BOT_APP_SECRET is required');
+  outbox.recover();
   const preflightUnknown = state.prepare(`SELECT task_key,part_index,source_message_id,channel_id,error
     FROM forward_attempts WHERE status='unknown' AND part_type='image'
       AND error LIKE 'Original image unavailable:%'`).all();
@@ -682,7 +717,7 @@ function setOnline(value) {
     console.log(`频道 ${label}：${status}${groups.length ? `（${groups.join('、')}）` : ''}；Discord 页面待扫描确认。`);
   }
 }
-module.exports = {start,setOnline,splitText,sourceTimeLabel,messageHeading,fengxunFingerprint:fengxun.fingerprint,
+module.exports = {start,setOnline,health,splitText,sourceTimeLabel,messageHeading,fengxunFingerprint:fengxun.fingerprint,
   routeAcceptsMessage,primaryAcceptsMessage,isAfterLiveWatermark,buildParts,processMessage,
   recoveryCandidates:manualRecovery.recoveryCandidates,queueRecovery:manualRecovery.queueRecovery,
   recoveryStatus:manualRecovery.recoveryStatus,cancelRecovery:manualRecovery.cancelRecovery,

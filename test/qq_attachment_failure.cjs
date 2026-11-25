@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const {DatabaseSync} = require('node:sqlite');
 const {test} = require('node:test');
 const liuyudong = require('../scripts/qq_channels/liuyudong/index.cjs');
+const {createOutbox} = require('../scripts/qq/core/outbox.cjs');
 
 const source = fs.readFileSync(require.resolve('../scripts/qq/core/forwarder.cjs'),'utf8');
 const section = (start,end) => source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
@@ -41,6 +42,7 @@ function fixture(t) {
     {module:liuModule,require:()=>fileSystem,Date});
   const context = vm.createContext({crypto,path,Date,Buffer,state,liuyudong:liuModule.exports,
     target:{group_openid:'primary'},running:false,online:true,paused:false,
+    root:'test',plannerStatus:{},planTelegram:()=>({enabled:0}),
     fs:fileSystem,
     tia:{channelId:'tia'},fengxun:{channelId:'feng',afterSend:()=>{}},
     yanchi:{channelIds:[],fanwanChannelId:'fan',afterSend:()=>{}},
@@ -55,6 +57,8 @@ function fixture(t) {
     console:{log:()=>{},warn:line=>warnings.push(line),error:()=>{}},
   });
   const api = vm.runInContext(functions+'\n({processMessage,tick,record,liveMessageEligible,attachmentFiles})',context);
+  context.outbox = createOutbox({state,send:api.processMessage,
+    onAccepted:(item)=>advanced.push(item.source_message_id)});
   return {state,context,api,messages,requests,diagnostics,warnings,advanced};
 }
 
@@ -80,6 +84,42 @@ test('exhausted Liu attachments are recorded once and the next message sends in 
   assert.equal(diagnostics.length,1);
   assert.equal(warnings.length,1);
   assert.equal(requests.length,1);
+});
+
+test('restart after a confirmed segment cannot resend it when the outbox was still processing',async t=>{
+  const {state,context,api,requests} = fixture(t);
+  const item = message('1568956663539695791');
+  api.record(keyFor(item),0,'text',item,'accepted',{platformId:'confirmed-before-crash'});
+  const key = context.outbox.enqueue(item,{group_openid:'primary'});
+  state.prepare("UPDATE sender_outbox SET status='processing' WHERE task_key=?").run(key);
+  context.outbox.recover();
+  await context.outbox.drain();
+  assert.deepEqual(requests,[]);
+  assert.equal(state.prepare('SELECT status FROM sender_outbox WHERE task_key=?').get(key).status,'accepted');
+});
+
+test('an edited TG message cannot bypass an uncertain send from before queue migration',async t=>{
+  const {api,requests} = fixture(t);
+  const item = {...message('telegram:-1001:10'),channel_id:'telegram:-1001:all'};
+  api.record(keyFor(item,'additional'),0,'text',item,'unknown',{}, {group_openid:'additional'});
+  assert.equal(await api.processMessage({...item,content_sha256:'edited'},{group_openid:'additional',telegram:true}),'unknown');
+  assert.equal(requests.length,0);
+  assert.equal(await api.processMessage({...item,source_message_id:'telegram:-1001:11'},{group_openid:'additional',telegram:true}),'accepted');
+  assert.deepEqual(requests,['messages']);
+});
+
+test('restart retains uncertain segments and drains the next message without retrying them',async t=>{
+  const {state,context,api,requests} = fixture(t);
+  const item = message('1568956663539695792');
+  api.record(keyFor(item),0,'text',item,'unknown');
+  const key = context.outbox.enqueue(item,{group_openid:'primary'});
+  state.prepare("UPDATE sender_outbox SET status='processing' WHERE task_key=?").run(key);
+  context.outbox.enqueue({...message('1568956663539695793'),source_timestamp:new Date().toISOString()},{group_openid:'primary'});
+  context.outbox.recover();
+  await context.outbox.drain();
+  assert.deepEqual(requests,['messages']);
+  assert.equal(state.prepare('SELECT status FROM sender_outbox WHERE task_key=?').get(key).status,'unknown');
+  assert.equal(state.prepare('SELECT status FROM forward_attempts WHERE task_key=?').get(key).status,'unknown');
 });
 
 test('failed images stop retrying without changing accepted text or resending it',async t=>{
