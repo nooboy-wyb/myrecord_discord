@@ -234,7 +234,8 @@
         check.dataset.hash = item.hash;
         row.append(check);
         const time = item.time ? new Date(item.time).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '时间未知';
-        const imageIssue = item.missing_image_hint ? '；正文提到图片，但本地未采到，暂不能发送'
+        const imageIssue = item.source_conflict ? '；来源频道冲突，已禁止发送'
+          : item.missing_image_hint ? '；正文提到图片，但本地未采到，暂不能发送'
           : item.ready ? '' : '；原图未完整保存，暂不能发送';
         row.append(document.createTextNode(` ${time}｜${item.author || '未知作者'}\n${item.excerpt || '（无正文）'}\n消息 ID ${item.id}；图片 ${item.image_count}${imageIssue}`));
         ui.list.appendChild(row);
@@ -372,6 +373,10 @@
     return '';
   }
   function extract(node, context, channelLabel) {
+    const identityNode = /^chat-messages-\d+-\d+$/.test(node.id || '') ? node
+      : node.closest?.('[id^="chat-messages-"]');
+    const domChannelId = identityNode?.id?.match(/^chat-messages-(\d+)-\d+$/)?.[1];
+    if (domChannelId && domChannelId !== context.channel_id) return null;
     const content = node.matches('[id^="message-content-"]') ? node
       : node.querySelector('[id^="message-content-"]') || node.querySelector('[class*="messageContent"]');
     const nodeId = node.id?.match(/^chat-messages-(?:\d+-)?(\d+)$/)?.[1];
@@ -414,6 +419,7 @@
       : attachments.size ? 'text_and_image' : 'text_only';
     return {
       schema_version: 1, source: 'discord_web', ...context,
+      dom_channel_id: domChannelId || null,
       channel_name: channelLabel || document.title,
       source_message_id: id,
       message_url: `https://discord.com/channels/${context.guild_id || '@me'}/${context.channel_id}/${id}`,
@@ -486,6 +492,9 @@
     }
     progress('config_wait');
     const {allowedChannels = [], channelLabels = {}} = await chrome.storage.local.get(['allowedChannels', 'channelLabels']);
+    const currentContext = route();
+    if (!currentContext || currentContext.guild_id !== context.guild_id
+      || currentContext.channel_id !== context.channel_id) return {allowed:false,extracted:0,route_changed:true};
     const configReadAt = Date.now();
     progress('dom_scan');
     const allowed = allowedChannels.includes(context.channel_id);

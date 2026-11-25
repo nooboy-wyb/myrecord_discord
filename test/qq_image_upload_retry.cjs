@@ -25,6 +25,7 @@ const message = {
     local_path:localPath,status:'saved'}]
 };
 const processMessage = vm.runInNewContext(`${source.slice(start,end)}\nprocessMessage`,{
+  sourceIdentity:{check:async()=>true},
   target:{group_openid:'primary'},liuyudong:{channelId:'liu'},
   fengxun:{channelId:'feng',afterSend:()=>{}},
   yanchi:{channelIds:[],fanwanChannelId:'fan',afterSend:()=>{}},

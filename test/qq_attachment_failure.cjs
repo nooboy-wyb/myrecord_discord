@@ -41,6 +41,7 @@ function fixture(t) {
   vm.runInNewContext(fs.readFileSync(require.resolve('../scripts/qq_channels/liuyudong/index.cjs'),'utf8'),
     {module:liuModule,require:()=>fileSystem,Date});
   const context = vm.createContext({crypto,path,Date,Buffer,state,setImmediate,liuyudong:liuModule.exports,
+    sourceIdentity:{check:async()=>true},
     target:{group_openid:'primary'},running:false,online:true,paused:false,
     root:'test',plannerStatus:{},planTelegram:()=>({enabled:0}),
     fs:fileSystem,

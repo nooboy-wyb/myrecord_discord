@@ -10,6 +10,7 @@ const tia = require('../../qq_channels/tia/index.cjs');
 const {createManualRecovery} = require('./manual_recovery.cjs');
 const {decorateChannelLabel} = require('./channel_title_style.cjs');
 const {createOutbox} = require('./outbox.cjs');
+const {createSourceIdentityGuard} = require('./source_identity.cjs');
 const {planTelegram,telegramAllowed} = require('./telegram_source.cjs');
 const alerts = require('./alerts.cjs');
 const exchangeChannelId = '1265882617530814535';
@@ -74,6 +75,7 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 const reportedUnconfirmed = new Set();
 const plannerStatus = {discord:{},telegram:{}};
+const sourceIdentity = createSourceIdentityGuard({sourceFiles});
 function pauseGroup(groupOpenid) {
   if (groupOpenid === target.group_openid) paused = true;
   else pausedGroups.add(groupOpenid);
@@ -377,6 +379,17 @@ function rememberPendingLiveImage(message, groupOpenid) {
   }
 }
 async function processMessage(message, context = {}) {
+  try {
+    if (!await sourceIdentity.check(message)) {
+      saveDiagnostic({event_id:crypto.randomUUID(),at:Date.now(),code:'QQ_SOURCE_CONFLICT_BLOCKED',
+        channel_id:message.channel_id,source_message_id:message.source_message_id,
+        error:'Source message is missing or belongs to conflicting channels'});
+      return 'blocked_source';
+    }
+  } catch (error) {
+    console.warn(`QQ 来源校验暂不可用，稍后重试：${error.message}`);
+    return 'deferred';
+  }
   const groupOpenid = context.group_openid || target.group_openid;
   if (Date.now() < Number(groupCooldownUntil.get(groupOpenid) || 0)) return 'deferred';
   const isolateUnknown = groupOpenid !== target.group_openid || message.channel_id === liuyudong.channelId;
@@ -534,7 +547,7 @@ async function processMessage(message, context = {}) {
   return 'accepted';
 }
 const manualRecovery = createManualRecovery({state,target,additionalChannelIds,additionalTargets,sourceFiles,sourceTime,
-  replayMessages,processMessage,isOnline:() => online,
+  replayMessages,processMessage,sourceIdentity,isOnline:() => online,
   isPaused:groupOpenid => groupOpenid === target.group_openid ? paused : pausedGroups.has(groupOpenid),pauseGroup});
 const outbox = createOutbox({state,send:processMessage,
   allowed:(message,context) => {
@@ -626,13 +639,16 @@ async function tick() {
       const request = state.prepare("SELECT * FROM replay_requests WHERE status='pending' AND (mode IS NULL OR mode='legacy') ORDER BY id LIMIT 1").get();
       if (request) {
         const messages = replayMessages(request);
+        let sourceBlocked = false;
         for (const message of messages) {
           const outcome = await processMessage(message,{replayRequestId:request.id});
           state.prepare('UPDATE replay_items SET status=? WHERE request_id=? AND source_message_id=?')
             .run(paused ? 'unknown' : outcome,request.id,message.source_message_id);
+          if (outcome === 'blocked_source') { sourceBlocked = true; break; }
           if (paused) break;
         }
-        if (!paused) {
+        if (sourceBlocked) state.prepare("UPDATE replay_requests SET status='blocked' WHERE id=?").run(request.id);
+        else if (!paused) {
           state.prepare("UPDATE replay_requests SET status='complete',completed_at=? WHERE id=?")
             .run(new Date().toISOString(),request.id);
           console.log(`频道 ${request.channel_id} 最近 ${request.message_limit} 条历史补发接口调用完成。`);

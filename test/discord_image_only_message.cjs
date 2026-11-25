@@ -22,6 +22,12 @@ const node = {
   querySelectorAll:selector => selector === 'a[href]' ? [attachment] : []
 };
 const message = extract(node,{guild_id:'1',channel_id:channelId},'交流频道');
+assert.equal(message.dom_channel_id,channelId);
+assert.equal(extract(node,{guild_id:'1',channel_id:'1222944235691708477'},'other'),null,
+  'stale channel DOM must not be relabelled using the new route');
+assert.equal(extract({...node,id:`message-${messageId}`,closest:()=>node},
+  {guild_id:'1',channel_id:'1222944235691708477'},'other'),null,
+  'a legacy message node must also check its channel container');
 assert.equal(message.source_message_id,messageId);
 assert.equal(message.body_raw,'');
 assert.equal(message.body_kind,'single_image');

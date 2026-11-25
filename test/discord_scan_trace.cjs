@@ -31,6 +31,13 @@ async function verifyPageStages() {
   const status = events.find(x=>x.type==='pageStatus');
   assert.equal(status.scan_trace.request_id,'request-1');
   assert.equal(status.scan_trace.visibility,'hidden');
+  events.length = 0;
+  const switched = scan(false,{requestId:'request-2'});
+  scope.route = () => ({guild_id:'1',channel_id:'1222944235691708477'});
+  resolveConfig({allowedChannels:[channel]});
+  assert.equal((await switched).route_changed,true);
+  assert(!events.some(event => ['capture','pageStatus'].includes(event.type)),
+    'a route change during the config await must abort capture and success reporting');
 }
 
 async function verifyPollAndUpload() {

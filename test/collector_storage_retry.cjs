@@ -85,6 +85,8 @@ test('temporary DC storage failure retains the extension queue and retry inserts
 test('invalid DC identity and malformed JSON remain permanent client rejections',async t => {
   const setup = await fixture(t);
   assert.equal((await setup.post({...setup.message,channel_id:'invalid'})).status,400);
+  assert.equal((await setup.post({...setup.message,dom_channel_id:'1265882617530814535'})).status,400);
+  assert.equal((await setup.post({...setup.message,dom_channel_id:setup.message.channel_id})).status,200);
   assert.equal((await setup.post({...setup.message,source_timestamp:'2000-01-01T00:00:00Z'})).status,400);
   const malformed = await fetch(setup.url,{method:'POST',headers:{'x-collector-token':setup.token},body:'{'});
   assert.equal(malformed.status,400);

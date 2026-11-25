@@ -30,6 +30,9 @@ function shanghaiDate() {
 class CaptureValidationError extends Error {}
 function save(message) {
   if (!message || message.source !== 'discord_web' || !/^\d+$/.test(String(message.channel_id)) || !/^\d+$/.test(String(message.source_message_id))) throw new CaptureValidationError('invalid message identity');
+  if (message.dom_channel_id != null && String(message.dom_channel_id) !== String(message.channel_id)) {
+    throw new CaptureValidationError('Discord DOM channel and capture channel do not match');
+  }
   if (typeof message.body_raw !== 'string' || message.body_raw.length > 100000 || !Array.isArray(message.attachments) || message.attachments.length > 100) throw new CaptureValidationError('invalid message content');
   if (message.source_timestamp) {
     const sourceTime = Date.parse(message.source_timestamp);

@@ -25,7 +25,7 @@ function createOutbox({state,send,allowed = () => true,onAccepted = () => {},now
   function terminal(message,context) {
     if (uncertain(message,context)) return true;
     const row = state.prepare('SELECT status FROM sender_outbox WHERE task_key=?').get(taskKey(message,context));
-    return row && ['accepted','skipped_duplicate','skipped_attachment','unknown'].includes(row.status);
+    return row && ['accepted','skipped_duplicate','skipped_attachment','blocked_source','unknown'].includes(row.status);
   }
   function enqueue(message,context) {
     const key = taskKey(message,context);
@@ -66,7 +66,7 @@ function createOutbox({state,send,allowed = () => true,onAccepted = () => {},now
         .run(new Date(now()).toISOString(),job.task_key);
       try {
         const outcome = await send(message,context);
-        const status = ['accepted','skipped_duplicate','skipped_attachment','unknown'].includes(outcome) ? outcome : 'deferred';
+        const status = ['accepted','skipped_duplicate','skipped_attachment','blocked_source','unknown'].includes(outcome) ? outcome : 'deferred';
         state.prepare('UPDATE sender_outbox SET status=?,next_attempt_at=?,updated_at=?,error=NULL WHERE task_key=?')
           .run(status,status === 'deferred' ? now()+5000 : 0,new Date(now()).toISOString(),job.task_key);
         if (status === 'accepted' || status === 'skipped_duplicate') {
