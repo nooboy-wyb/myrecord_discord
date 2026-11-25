@@ -29,8 +29,16 @@ try {
         $env:NO_PROXY = '127.0.0.1,localhost'
     }
     $node = (Get-Command node -ErrorAction Stop).Source
-    & $node --use-env-proxy (Join-Path $PSScriptRoot 'qq\sender.cjs')
-    if ($LASTEXITCODE -ne 0) { throw "QQ sender exited with code $LASTEXITCODE" }
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $senderExitCode = -1
+    try {
+        & $node --use-env-proxy (Join-Path $PSScriptRoot 'qq\sender.cjs')
+        $senderExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($senderExitCode -ne 0) { throw "QQ sender exited with code $senderExitCode" }
 } finally {
     foreach ($name in $previousEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($name,$previousEnvironment[$name],'Process')
