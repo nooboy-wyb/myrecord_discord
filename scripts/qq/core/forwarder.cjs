@@ -31,6 +31,7 @@ function channelLabels() {
   return labelCache.data;
 }
 const state = new DatabaseSync(path.join(root, 'qq-forward.sqlite'));
+state.exec('PRAGMA busy_timeout=15000');
 state.exec(`CREATE TABLE IF NOT EXISTS forward_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS replay_requests (
   id INTEGER PRIMARY KEY, channel_id TEXT NOT NULL, message_limit INTEGER NOT NULL,

@@ -58,3 +58,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_telegram.ps1
 - 单条文字验证可运行 `node scripts/telegram/send_qq_sample.cjs TG1 -1004472038576 13613 77695 --preview`。目标必须已绑定、没有 Discord 频道配置，消息须匹配成功话题审计且无附件。确认预览后，在内存中加载现有加密 QQ 凭据并使用 `--send`，复用 QQ 发送器及发送记录；Telegram 消息和话题使用 `telegram:` 命名空间，任何既有发送尝试均拒绝重发。该命令不启动自动转发。
 
 运行归档、加密和时间窗口审计测试：`python -m unittest discover -s test -p 'test_telegram_*.py'`。
+
+## 已审核历史批量发送
+
+`send_qq_history.cjs` 从指定的汇总审计选取来源；必须通过固定窗口重复核验。先使用 `--preview`，再在内存中加载现有加密 QQ 凭据，以相同参数使用 `--send`：
+
+```powershell
+node scripts/telegram/send_qq_history.cjs TG1 selected-check-20261125T145422.json --preview -1003432435785:all -1003452957222:all -1004472038576:13613
+```
+
+按源消息时间顺序发送，标题保留频道/话题及“历史补发”，第二行显示原消息北京时间。图片先核对 SHA-256，使用现有 QQ 原图上传及发送逻辑。文字、图片共用每群至少两秒间隔；此前全部接受的源消息跳过，存在不完整或不确定发送记录时拒绝整批重试。逐条结果与 QQ 平台消息 ID 写入 `qq-forward.sqlite`，独立批次审计保存在 `data/telegram/audits/qq-history-*.json`。此命令是一次性历史发送，不启动持续采集或自动转发。

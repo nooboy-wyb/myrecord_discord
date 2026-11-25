@@ -43,7 +43,7 @@ async function main() {
   const message = {
     channel_id:`telegram:${peerId}:${topicId}`,
     source_message_id:`telegram:${peerId}:${messageId}`,
-    channel_name:`${name}｜Telegram｜${row.channel_name}｜${audit.topic_title}`,
+    channel_name:`${row.channel_name}｜${audit.topic_title}`,
     source_timestamp:row.source_timestamp, content_sha256:row.content_sha256,
     body_raw:row.body_raw, attachments_json:'[]', attachments:[]
   };
