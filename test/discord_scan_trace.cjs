@@ -65,7 +65,7 @@ async function verifyPollAndUpload() {
         uploadSignal=options.signal;
         if(failUpload)return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason)));
       }
-      return {ok:true};
+      return {ok:true,status:200,text:async()=>'{"id":1}'};
     }});
   vm.runInContext(background,ctx);
   await vm.runInContext('refreshMonitoredTabs()',ctx);
@@ -86,7 +86,7 @@ async function verifyPollAndUpload() {
   assert.equal(vm.runInContext('sending',ctx),false,'timeout releases the uploader');
   assert(data.queue[0].message.capture_trace.queued_at>=now);
   failUpload=false;
-  data.captureRetryAt=Date.now()-1; // Retry after the persisted deadline.
+  data.captureChannelRetries[channel].retryAt=Date.now()-1;
   await vm.runInContext('flush()',ctx);
   assert.equal(data.queue.length,0,'retry safely acknowledges the retained capture');
 }

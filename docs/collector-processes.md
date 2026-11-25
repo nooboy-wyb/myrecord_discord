@@ -72,18 +72,21 @@ DC 健康状态包含最后入库时间和收到条数。QQ 状态包含 Gateway
 
 Node 日志分别写入 `data/logs/collector-YYYY-MM-DD.log` 和 `qq-sender-YYYY-MM-DD.log`。TG 在终端输出每轮摘要，同时原子更新 `monitor-status.json`。浏览器原有暂停、恢复和补发控制仍请求 8765，由采集器代理到发送器；发送器离线返回 503，消息入库仍可用。
 
+DC 入库遇到临时存储故障返回 503，扩展保留原消息并按频道退避重试；身份、时间戳或 JSON 校验失败仍返回 400。采集、附件下载和发送器读取日归档时最多等待 SQLite 锁五秒；发送规划遇到数据库繁忙会在下一轮重试，不因此永久暂停。扩展 0.2.62 清理成功重试后遗留的唤醒定时器，原有频道扫描、去重规则和页面恢复逻辑保持不变。
+
 ## 本地验证
 
-测试使用临时数据目录、虚构身份、模拟 Telegram 返回和 QQ 传输，不解密现有凭据、不连接真实 Telegram、不向 QQ 发消息。三个真实子进程覆盖：QQ 离线时两端继续入库、恢复后按队列发送、再次重启不重发、同群两秒间隔、原控制 URL 代理及鉴权。测试结束清理临时目录和子进程。
+测试使用临时数据目录、虚构身份、模拟 Telegram 返回和 QQ 传输，不解密现有凭据、不连接真实 Telegram、不向 QQ 发消息。三个真实子进程覆盖：QQ 离线时两端继续入库、QQ 和 TG 同时停止时原熬鹰及熬鹰实盘仍可采集、恢复后按队列发送、再次重启不重发、各群两秒间隔、原控制 URL 代理及鉴权。另用真实 HTTP 和扩展上传队列验证存储失败后保留消息、重试只入库一次，以及日归档短暂锁定时等待后成功写入。测试结束清理临时目录和子进程。
 
 准备独立 Python 环境并安装已有 requirements 后运行：
 
 ```powershell
 $env:MUSE_TEST_PYTHON = (Resolve-Path .\data\local-validation\python\Scripts\python.exe).Path
-node --test test/collector_processes.cjs test/qq_outbox.cjs test/telegram_source.cjs test/collector_diagnostics_concurrency.cjs
+$nodeTests = @(Get-ChildItem -LiteralPath test -File | Where-Object { $_.Name -match '\.(cjs|test\.js)$' } | ForEach-Object { $_.FullName })
+node --test @nodeTests
 & $env:MUSE_TEST_PYTHON -m unittest discover -s test -p 'test_telegram_*.py'
 ```
 
 没有 `MUSE_TEST_PYTHON` 时跨语言三进程测试会明确跳过。所有进程可通过 `MUSE_DATA_DIR` 使用另一个数据根目录；HTTP 端口分别用 `MUSE_COLLECTOR_PORT`、`MUSE_QQ_PORT` 覆盖。上线时要先停止旧的混合 DC+QQ 进程，再启动这三个进程；本次仅做本地验证，不修改远端运行状态。
 
-本次本地验证通过三进程联动、发送器崩溃后的已接受/未知分段恢复、跨重启群限速，以及 Python 归档/采集检查。完整回归还发现两个既有扩展测试文件 `test/discord_scan_trace.cjs`、`test/discord_upload_drain.cjs` 失败或超时；它们和对应扩展源码相对原版本均未修改，未计入通过结果。
+2026-11-26 本地完整回归通过 69 项 Node 测试和 26 项 Python 测试，无排除或跳过。此前两个扩展测试的响应模拟、旧退避字段和测试等待顺序已修正，均纳入完整回归。结果覆盖本地故障注入与模拟传输；远端尚未部署此版本，真实浏览器采集和 QQ 网络仍需部署后核验。

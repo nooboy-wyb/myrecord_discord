@@ -108,6 +108,19 @@ test('an edited TG message cannot bypass an uncertain send from before queue mig
   assert.deepEqual(requests,['messages']);
 });
 
+test('temporary archive contention retries planning without permanently pausing DC forwarding',async t=>{
+  const {api,context,requests} = fixture(t);
+  context.pendingMessages = () => {throw Object.assign(Error('database is locked'),{errcode:5});};
+  await api.tick();
+  assert.equal(context.paused,false);
+  assert.equal(context.running,false);
+  assert.equal(context.plannerStatus.discord.retrying,true);
+  context.pendingMessages = () => [message('1568956663539695799')];
+  await api.tick();
+  assert.equal(context.plannerStatus.discord.ok,true);
+  assert.deepEqual(requests,['messages']);
+});
+
 test('restart retains uncertain segments and drains the next message without retrying them',async t=>{
   const {state,context,api,requests} = fixture(t);
   const item = message('1568956663539695792');

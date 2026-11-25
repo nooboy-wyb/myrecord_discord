@@ -133,6 +133,10 @@ async function flush() {
         active.set(channel,upload);
       }
       if (batch.retryAt) scheduleCaptureRetry(batch.retryAt);
+      else if (captureRetryTimer != null) {
+        clearTimeout(captureRetryTimer);
+        captureRetryTimer = undefined;
+      }
       if (!active.size) {
         if (uploadWakeRequested) continue;
         return;

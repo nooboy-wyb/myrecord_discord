@@ -11,6 +11,8 @@ const {DatabaseSync} = require('node:sqlite');
 
 const project = path.resolve(__dirname,'..');
 const channel = '1265882617530814535';
+const primaryChannel = '1381176601802440744';
+const liveChannel = '1571167749558902885';
 const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
 async function freePort() {
   const server = net.createServer();
@@ -36,7 +38,7 @@ async function stop(child) {
   await closed;
 }
 
-test('isolated DC/TG collectors survive sender downtime, drain once, and share group spacing',
+test('original DC routes survive QQ and TG downtime, drain once, and retain per-group spacing',
   {timeout:45000,skip:!process.env.MUSE_TEST_PYTHON && 'Set MUSE_TEST_PYTHON to run the three-process smoke test'},async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(),'muse-processes-'));
   const children = [];
@@ -51,7 +53,8 @@ test('isolated DC/TG collectors survive sender downtime, drain once, and share g
   const write = (file,value) => fs.writeFileSync(path.join(root,file),JSON.stringify(value));
   fs.mkdirSync(path.join(root,'telegram'));
   write('qq-group-openid.json',{app_id:'123',group_openid:'PRIMARY'});
-  write('qq-forward-controls.json',{primary_enabled:false});
+  write('qq-forward-controls.json',{primary_enabled:true,
+    primary_channel_enabled_at:{[primaryChannel]:enabledAt,[liveChannel]:enabledAt}});
   write('qq-additional-routes.json',{routes:[
     {name:'DC',group_openid:'SHARED',channel_ids:[channel],enabled_at:enabledAt},
     {name:'TG1',group_openid:'SHARED',channel_ids:[],enabled_at:enabledAt}
@@ -89,10 +92,10 @@ test('isolated DC/TG collectors survive sender downtime, drain once, and share g
   await until(() => health(senderPort));
   assert.equal((await health(senderPort)).online,false);
   assert.equal((await fetch(`http://127.0.0.1:${senderPort}/v1/health`)).status,401);
-  async function capture(id) {
+  async function capture(id,channelId = channel) {
     const now = Date.now();
     const sourceId = ((BigInt(now)-1420070400000n)<<22n)+BigInt(id);
-    const response = await request(collectorPort,'/v1/messages',{source:'discord_web',channel_id:channel,
+    const response = await request(collectorPort,'/v1/messages',{source:'discord_web',channel_id:channelId,
       source_message_id:String(sourceId),channel_name:'DC fixture',source_timestamp:new Date(now).toISOString(),
       body_raw:`DC fixture ${id}`,attachments:[]});
     assert.equal(response.status,200,await response.text());
@@ -104,7 +107,10 @@ test('isolated DC/TG collectors survive sender downtime, drain once, and share g
   await stop(sender);
   await capture(2);
   await collectTelegram(2);
-  assert.equal((await health(collectorPort)).received,2);
+  await stop(telegram);
+  await capture(3,primaryChannel);
+  await capture(4,liveChannel);
+  assert.equal((await health(collectorPort)).received,4);
   const unavailable = await request(collectorPort,`/v1/forwarding/status?channel_id=${channel}`);
   assert.equal(unavailable.status,503);
   const archive = new DatabaseSync(path.join(root,'telegram','archive.sqlite'),{readOnly:true});
@@ -115,12 +121,16 @@ test('isolated DC/TG collectors survive sender downtime, drain once, and share g
   await until(async () => (await health(senderPort))?.online);
   await until(async () => {
     const status = await health(senderPort);
-    return !status.running && status.outbox.reduce((count,item) => count+(item.status === 'accepted' ? Number(item.count) : 0),0) === 4;
+    return !status.running && status.outbox.reduce((count,item) => count+(item.status === 'accepted' ? Number(item.count) : 0),0) === 6;
   });
   const sends = () => fs.readFileSync(path.join(root,'mock-sends.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(sends().length,4,output.join('').slice(-4000));
-  assert.equal(new Set(sends().map(item => item.payload.content)).size,4);
-  for (let index = 1; index < sends().length; index++) assert.ok(sends()[index].at-sends()[index-1].at >= 1990);
+  assert.equal(sends().length,6,output.join('').slice(-4000));
+  assert.equal(new Set(sends().map(item => item.payload.content)).size,6);
+  for (const group of ['PRIMARY','SHARED']) {
+    const messages = sends().filter(item => item.group_openid === group);
+    assert.equal(messages.length,group === 'PRIMARY' ? 2 : 4);
+    for (let index = 1; index < messages.length; index++) assert.ok(messages[index].at-messages[index-1].at >= 1990);
+  }
   const proxy = await request(collectorPort,`/v1/forwarding/status?channel_id=${channel}`);
   assert.equal(proxy.status,200);
   const paused = await request(collectorPort,'/v1/forwarding/pause',{channel_id:channel,paused:true});
@@ -129,7 +139,7 @@ test('isolated DC/TG collectors survive sender downtime, drain once, and share g
   sender = launch(process.execPath,['--require',preload,'scripts/qq/sender.cjs']);
   await until(async () => (await health(senderPort))?.online);
   await pause(5500);
-  assert.equal(sends().length,4,'restart must not replay accepted messages');
+  assert.equal(sends().length,6,'restart must not replay accepted messages');
   assert.equal(collector.exitCode,null);
-  assert.equal(telegram.exitCode,null);
+  assert.notEqual(telegram.signalCode,null);
 });

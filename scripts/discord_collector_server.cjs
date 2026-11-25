@@ -27,14 +27,15 @@ const pageStatusReporter = createPageStatusReporter({
 function shanghaiDate() {
   return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 }
+class CaptureValidationError extends Error {}
 function save(message) {
-  if (!message || message.source !== 'discord_web' || !/^\d+$/.test(String(message.channel_id)) || !/^\d+$/.test(String(message.source_message_id))) throw Error('invalid message identity');
-  if (typeof message.body_raw !== 'string' || message.body_raw.length > 100000 || !Array.isArray(message.attachments) || message.attachments.length > 100) throw Error('invalid message content');
+  if (!message || message.source !== 'discord_web' || !/^\d+$/.test(String(message.channel_id)) || !/^\d+$/.test(String(message.source_message_id))) throw new CaptureValidationError('invalid message identity');
+  if (typeof message.body_raw !== 'string' || message.body_raw.length > 100000 || !Array.isArray(message.attachments) || message.attachments.length > 100) throw new CaptureValidationError('invalid message content');
   if (message.source_timestamp) {
     const sourceTime = Date.parse(message.source_timestamp);
     const snowflakeTime = Number((BigInt(message.source_message_id) >> 22n) + 1420070400000n);
     if (!Number.isFinite(sourceTime) || Math.abs(sourceTime - snowflakeTime) > 60_000) {
-      throw Error('Discord message ID and timestamp do not match');
+      throw new CaptureValidationError('Discord message ID and timestamp do not match');
     }
   }
   const archiveDate = shanghaiDate();
@@ -42,6 +43,7 @@ function save(message) {
   fs.mkdirSync(folder, {recursive: true});
   const db = new DatabaseSync(path.join(folder, 'messages.sqlite'));
   try {
+    db.exec('PRAGMA busy_timeout=5000');
     db.exec(`CREATE TABLE IF NOT EXISTS discord_web_messages (
       id INTEGER PRIMARY KEY, channel_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
       guild_id TEXT, channel_name TEXT, message_url TEXT, author_display TEXT,
@@ -101,6 +103,7 @@ function lookupMinute(channelId, localMinute) {
     if (!fs.existsSync(file)) continue;
     const db = new DatabaseSync(file, {readOnly:true});
     try {
+      db.exec('PRAGMA busy_timeout=5000');
       const rows = db.prepare(`SELECT id,source_message_id,source_timestamp,captured_at,author_display,body_raw,body_kind,attachments_json
         FROM discord_web_messages WHERE channel_id=? AND source_timestamp>=? AND source_timestamp<?`).all(channelId, start, end);
       for (const row of rows) {
@@ -206,7 +209,14 @@ const server = http.createServer((req, res) => {
       reply(200, {id});
       attachmentQueue.wake();
     }
-    catch (error) { reply(400, {error:String(error.message)}); }
+    catch (error) {
+      if (error instanceof CaptureValidationError || error instanceof SyntaxError) {
+        reply(400,{error:String(error.message)});
+      } else {
+        console.error('Capture storage failed:',error.code || error.name);
+        reply(503,{error:'Capture storage unavailable; retry this message'});
+      }
+    }
   });
 });
 function backfillToday() {
@@ -215,6 +225,7 @@ function backfillToday() {
   if (!fs.existsSync(file)) return;
   const db = new DatabaseSync(file);
   try {
+    db.exec('PRAGMA busy_timeout=5000');
     const rows = db.prepare('SELECT id,payload_json FROM discord_web_messages WHERE attachments_json<>?').all('[]');
     db.exec('BEGIN IMMEDIATE');
     for (const row of rows) attachmentQueue.enqueue(db,date,row.id,JSON.parse(row.payload_json));

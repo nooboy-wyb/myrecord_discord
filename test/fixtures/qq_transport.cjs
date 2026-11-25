@@ -11,7 +11,8 @@ global.fetch = async (url, options = {}) => {
   if (address.pathname === '/gateway') return Response.json({url:'wss://fixture.invalid'});
   if (/^\/v2\/groups\/[A-Z]+\/messages$/.test(address.pathname)) {
     const payload = JSON.parse(options.body);
-    fs.appendFileSync(path.join(root,'mock-sends.jsonl'),JSON.stringify({at:Date.now(),pid:process.pid,payload})+'\n');
+    fs.appendFileSync(path.join(root,'mock-sends.jsonl'),JSON.stringify({at:Date.now(),pid:process.pid,
+      group_openid:address.pathname.split('/')[3],payload})+'\n');
     return Response.json({id:`fixture-${Date.now()}`});
   }
   throw Error(`Unmocked QQ endpoint: ${address.pathname}`);

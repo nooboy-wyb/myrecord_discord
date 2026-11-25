@@ -74,6 +74,7 @@ function createAttachmentQueue({root,fetchImpl = globalThis.fetch,now = Date.now
       if (!fs.existsSync(file)) continue;
       const db = new DatabaseSync(file);
       try {
+        db.exec('PRAGMA busy_timeout=5000');
         if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='discord_web_attachment_jobs'").get()) continue;
         // An interrupted download is safe to retry: it cannot send a QQ message.
         db.prepare(`UPDATE discord_web_attachment_jobs SET status='retry',next_attempt_at=?
@@ -87,6 +88,7 @@ function createAttachmentQueue({root,fetchImpl = globalThis.fetch,now = Date.now
     for (const date of [...dates].sort().reverse()) {
       const db = new DatabaseSync(fileFor(date));
       try {
+        db.exec('PRAGMA busy_timeout=5000');
         if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='discord_web_attachment_jobs'").get()) {
           dates.delete(date);
           continue;
@@ -130,6 +132,7 @@ function createAttachmentQueue({root,fetchImpl = globalThis.fetch,now = Date.now
     const nextAt = retry ? now()+retryDelays[Math.min(job.attempts-1,retryDelays.length-1)] : 0;
     const db = new DatabaseSync(fileFor(job.date));
     try {
+      db.exec('PRAGMA busy_timeout=5000');
       db.exec('BEGIN IMMEDIATE');
       db.prepare(`UPDATE discord_web_attachment_files SET local_path=?,sha256=?,status=?,error=?,updated_at=?
         WHERE message_id=? AND source_url=?`).run(localPath,digest,retry?'pending':status,failure,
@@ -159,8 +162,11 @@ function createAttachmentQueue({root,fetchImpl = globalThis.fetch,now = Date.now
       const task = download(job).catch(error => {
         // Recover a failed database write on the next pass as well as on restart.
         const db = new DatabaseSync(fileFor(job.date));
-        try { db.prepare(`UPDATE discord_web_attachment_jobs SET status='retry',next_attempt_at=?
-          WHERE message_id=? AND source_url=? AND status='downloading'`).run(now()+30000,job.message_id,job.source_url); }
+        try {
+          db.exec('PRAGMA busy_timeout=5000');
+          db.prepare(`UPDATE discord_web_attachment_jobs SET status='retry',next_attempt_at=?
+          WHERE message_id=? AND source_url=? AND status='downloading'`).run(now()+30000,job.message_id,job.source_url);
+        }
         finally { db.close(); }
         throw error;
       }).finally(() => {active.delete(task);wake();});

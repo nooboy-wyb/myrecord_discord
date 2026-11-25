@@ -279,6 +279,7 @@ function pendingMessages() {
   for (const file of sourceFiles()) {
     const db = new DatabaseSync(file, {readOnly: true});
     try {
+      db.exec('PRAGMA busy_timeout=5000');
       const messages = db.prepare(`SELECT id,channel_id,channel_name,author_display,source_message_id,source_timestamp,content_sha256,body_raw,attachments_json,captured_at
         FROM discord_web_messages WHERE captured_at >= ? ORDER BY captured_at,id`).all(startAt);
       for (const message of messages) {
@@ -296,6 +297,7 @@ function recentMessages(channelId, limit) {
   for (const file of sourceFiles()) {
     const db = new DatabaseSync(file, {readOnly: true});
     try {
+      db.exec('PRAGMA busy_timeout=5000');
       const messages = db.prepare(`SELECT id,channel_id,channel_name,author_display,source_message_id,source_timestamp,
         content_sha256,body_raw,attachments_json,captured_at FROM discord_web_messages WHERE channel_id=?`).all(channelId);
       for (const message of messages) {
@@ -327,6 +329,7 @@ function replayMessages(request) {
     for (const file of sourceFiles()) {
       const db = new DatabaseSync(file,{readOnly:true});
       try {
+        db.exec('PRAGMA busy_timeout=5000');
         const message = db.prepare(`SELECT id,channel_id,channel_name,author_display,source_message_id,source_timestamp,
           content_sha256,body_raw,attachments_json,captured_at FROM discord_web_messages
           WHERE channel_id=? AND source_message_id=? AND content_sha256=?`).get(item.channel_id,item.source_message_id,item.content_sha256);
@@ -635,10 +638,15 @@ async function tick() {
     plannerStatus.discord = {ok:true,at:new Date().toISOString()};
   }
   catch (error) {
-    paused = true;
-    plannerStatus.discord = {error:error.message,at:new Date().toISOString()};
-    console.error(`QQ 转发暂停：${error.message}`);
-    alerts.notify(`tick:${error.message}`,`【QQ 转发告警】群 1 转发暂停：${error.message}。请检查本地服务日志。`);
+    if ([5,6].includes(Number(error.errcode) & 255)) {
+      plannerStatus.discord = {retrying:true,error:'Discord archive is busy; next tick will retry',at:new Date().toISOString()};
+      console.warn('DC 归档暂时繁忙，下一轮重新规划待发消息。');
+    } else {
+      paused = true;
+      plannerStatus.discord = {error:error.message,at:new Date().toISOString()};
+      console.error(`QQ 转发暂停：${error.message}`);
+      alerts.notify(`tick:${error.message}`,`【QQ 转发告警】群 1 转发暂停：${error.message}。请检查本地服务日志。`);
+    }
   }
   try { if (online) await outbox.drain(); }
   catch (error) { console.error(`QQ 待发队列处理失败：${error.message}`); }
