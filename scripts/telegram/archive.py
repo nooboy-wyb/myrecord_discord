@@ -9,6 +9,13 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def content_digest(message):
+    identity = [message["body_raw"], message.get("edit_timestamp"),
+                message.get("grouped_id"), message.get("attachments", [])]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True,
+                                    ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 class Archive:
     def __init__(self, folder):
         self.folder = Path(folder)
@@ -48,10 +55,7 @@ class Archive:
         self.connection.close()
 
     def save(self, message):
-        identity = [message["body_raw"], message.get("edit_timestamp"),
-                    message.get("grouped_id"), message.get("attachments", [])]
-        digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
-                                          ensure_ascii=False).encode("utf-8")).hexdigest()
+        digest = content_digest(message)
         observed_at = utc_now()
         with self.connection:
             result = self.connection.execute("""
@@ -68,8 +72,8 @@ class Archive:
                 SELECT id FROM telegram_messages
                 WHERE peer_id=? AND message_id=? AND content_sha256=?
             """, (message["peer_id"], message["message_id"], digest)).fetchone()
-            self.connection.execute("UPDATE telegram_messages SET last_observed_at=? WHERE id=?",
-                                    (observed_at, row["id"]))
+            self.connection.execute("UPDATE telegram_messages SET last_observed_at=?,payload_json=? WHERE id=?",
+                                    (observed_at, json.dumps(message, ensure_ascii=False), row["id"]))
             for attachment in message.get("attachments", []):
                 status = "pending" if attachment["kind"] == "image" else "metadata_only"
                 self.connection.execute("""

@@ -183,7 +183,8 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
           route.group_openid = packet.d.group_openid;
           route.enabled_at = new Date().toISOString();
           fs.writeFileSync(additionalRoutesPath, JSON.stringify(config, null, 2));
-          console.log(`已绑定附加目标群 ${route.qq_group_number}；仅接收配置的 Discord 频道。`);
+          console.log(`已绑定附加目标群 ${route.name || route.qq_group_number}（${route.qq_group_number}）。`);
+          if (route.binding_confirmation === false) continue;
           api(`https://api.bot.qq.com/v2/groups/${encodeURIComponent(route.group_openid)}/messages`, {
             method:'POST',
             headers:{authorization,'content-type':'application/json; charset=utf-8'},

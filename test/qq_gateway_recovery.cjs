@@ -6,13 +6,18 @@ const {test} = require('node:test');
 
 const source = fs.readFileSync(require.resolve('../scripts/qq/core/gateway.cjs'),'utf8');
 
-async function harness() {
+async function harness({routes = []} = {}) {
   let clock = 100000;
   let timerId = 0;
   const timers = new Map();
   const sockets = [];
   const states = [];
   const logs = [];
+  const requests = [];
+  const files = new Map([
+    ['qq-group-openid.json', JSON.stringify({group_openid:'PRIMARY'})],
+    ['qq-additional-routes.json', JSON.stringify({routes})]
+  ]);
   class Clock extends Date { static now() { return clock; } }
   class FakeSocket {
     static OPEN = 1;
@@ -35,15 +40,22 @@ async function harness() {
   };
   const record = value => logs.push(value);
   const context = {
-    require:name => ['fs','node:fs'].includes(name) ? {existsSync:() => true}
+    require:name => ['fs','node:fs'].includes(name) ? {
+      existsSync:file => files.has(path.basename(file)),
+      readFileSync:file => files.get(path.basename(file)),
+      writeFileSync:(file,value) => files.set(path.basename(file),value)
+    }
       : ['path','node:path'].includes(name) ? path
       : ['crypto','node:crypto'].includes(name) ? {randomUUID:() => `connection-${sockets.length}`}
       : {bindingCode:() => null},
     __dirname:path.resolve('scripts/qq/core'),module:{exports:{}},Date:Clock,AbortSignal,
     process:{env:{QQ_BOT_APP_ID:'123',QQ_BOT_APP_SECRET:'fake-secret'}},
     console:{log:record,warn:record,error:record},WebSocket:FakeSocket,
-    fetch:async url => ({ok:true,json:async() => url.endsWith('getAppAccessToken')
-      ? {access_token:'fake-token'} : {url:'wss://fake-gateway'}}),
+    fetch:async (url,options) => {
+      requests.push({url,options});
+      return {ok:true,json:async() => url.endsWith('getAppAccessToken')
+        ? {access_token:'fake-token'} : url.includes('/messages') ? {id:'confirmation'} : {url:'wss://fake-gateway'}};
+    },
     setTimeout:(callback,ms) => addTimer(callback,ms,false),
     setInterval:(callback,ms) => addTimer(callback,ms,true),
     clearTimeout:id => timers.delete(id),clearInterval:id => timers.delete(id)
@@ -74,8 +86,37 @@ async function harness() {
   }
   context.module.exports.startGateway(value => states.push(value));
   await settle();
-  return {sockets,timers,states,logs,advance,hello,ready};
+  return {sockets,timers,states,logs,advance,hello,ready,files,requests};
 }
+
+test('silent binding saves TG1 OpenID only for its binding message and sends no confirmation',async() => {
+  const setup = await harness({routes:[{name:'TG1',qq_group_number:'1137686115',binding_code:'TG1',
+    binding_confirmation:false,channel_ids:[]}]});
+  setup.hello(); setup.ready();
+  const socket = setup.sockets[0];
+  for (const d of [
+    {group_openid:'OTHER',content:'TG1'},
+    {group_openid:'OTHER',content:'bind 1137686115 WRONG'},
+    {group_openid:'PRIMARY',content:'bind 1137686115 TG1'}
+  ]) socket.packet({op:0,t:'GROUP_AT_MESSAGE_CREATE',d});
+  assert.equal(JSON.parse(setup.files.get('qq-additional-routes.json')).routes[0].group_openid,undefined);
+  socket.packet({op:0,t:'GROUP_AT_MESSAGE_CREATE',d:{group_openid:'TG_GROUP',content:'bind 1137686115 TG1'}});
+  await setup.advance(0);
+  const route = JSON.parse(setup.files.get('qq-additional-routes.json')).routes[0];
+  assert.equal(route.group_openid,'TG_GROUP');
+  assert(route.enabled_at);
+  assert.equal(setup.requests.filter(request => request.url.includes('/messages')).length,0);
+});
+
+test('existing routes retain the default one-time binding confirmation',async() => {
+  const setup = await harness({routes:[{qq_group_number:'12345',binding_code:'CODE',channel_ids:['123']}]});
+  setup.hello(); setup.ready();
+  const packet = {op:0,t:'GROUP_AT_MESSAGE_CREATE',d:{group_openid:'OTHER',content:'bind 12345 CODE'}};
+  setup.sockets[0].packet(packet);
+  setup.sockets[0].packet(packet);
+  await setup.advance(0);
+  assert.equal(setup.requests.filter(request => request.url.includes('/messages')).length,1);
+});
 
 test('op:7 reconnects immediately, resumes the last sequence, and ignores the old socket',async() => {
   const setup = await harness();

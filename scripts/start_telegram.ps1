@@ -1,9 +1,12 @@
 param(
-    [ValidateSet('Setup', 'Configure', 'Login', 'Status', 'Channels', 'Probe', 'Watch')]
+    [ValidateSet('Setup', 'Configure', 'Login', 'Status', 'Channels', 'Probe', 'Watch', 'History')]
     [string]$Action = 'Status',
     [string]$Channel,
     [ValidateRange(1, 1000)][int]$Limit = 5,
     [ValidateRange(0, 2147483647)][int]$Seconds = 60,
+    [ValidateRange(1, 720)][int]$Hours = 24,
+    [string]$Until,
+    [int]$Topic,
     [ValidateSet('qr', 'phone')][string]$LoginMethod = 'qr',
     [string]$Proxy,
     [string]$Python
@@ -52,6 +55,11 @@ try {
     $telegramArguments += @('--limit', [string]$Limit)
     if ($Channel) { $telegramArguments += @('--channel', $Channel) }
     if ($Action -eq 'Watch') { $telegramArguments += @('--seconds', [string]$Seconds) }
+    if ($Action -eq 'History') {
+        $telegramArguments += @('--hours', [string]$Hours)
+        if ($Until) { $telegramArguments += @('--until', $Until) }
+        if ($PSBoundParameters.ContainsKey('Topic')) { $telegramArguments += @('--topic', [string]$Topic) }
+    }
     if ($Action -eq 'Login') { $telegramArguments += @('--login-method', $LoginMethod) }
     & $runtime @telegramArguments
     if ($LASTEXITCODE -ne 0) { throw "Telegram $Action exited with code $LASTEXITCODE" }

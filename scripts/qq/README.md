@@ -18,6 +18,8 @@ QQ Gateway 收到服务器 `op:7` 后立即停止旧连接的心跳并重连，�
 - `selftest/send_qq_test.ps1`：加载本地凭证并运行发送测试。
 - `selftest/get_qq_group_openid.ps1`：监听群消息以取得群 OpenID。
 - `selftest/get_qq_additional_group_openid.ps1`：查看或等待附加群绑定。
+
+附加群配置可用 `name` 设置显示名称，`binding_confirmation: false` 表示只记录绑定事件的 OpenID，不自动发送 Discord 绑定测试文案。空 `channel_ids` 的绑定记录不会启用 Discord 自动转发。
 - `selftest/repair_confirmed_missing_image.ps1`：仅在用户确认群内缺图后，对指定 Discord 消息和单频道附加群执行一次定向补图；要求原文字已接受、图片结果未知且无既有补发记录。先用 `-DryRun` 预检，补发另记为 `repair`，不覆盖原尝试。
 - `selftest/repair_uncaptured_image_from_url.ps1`：仅在用户提供与原消息同频道的 Discord 附件地址并确认群内缺图后使用。要求归档只有一条纯文字版本且该文字仅成功发送一次；先用 `-DryRun` 验证原图、路由和发送记录，再归档原图并只补发图片，不重发文字。
 - `selftest/check_history.cjs`：只读统计频道历史消息是否已入库。

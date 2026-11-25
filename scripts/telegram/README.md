@@ -1,6 +1,6 @@
 # Telegram 登录与入库验证
 
-本阶段只验证账号授权、频道读取、SQLite 归档和图片落盘，不发送 QQ。入口是项目根目录下的 `scripts/start_telegram.ps1`。采集不依赖 Telegram 网页或 Desktop。
+采集入口是项目根目录下的 `scripts/start_telegram.ps1`，验证账号授权、频道读取、SQLite 归档和图片落盘。采集不依赖 Telegram 网页或 Desktop，也不会自动发送 QQ；单条 QQ 样例使用独立命令。
 
 ## 首次配置与登录
 
@@ -32,6 +32,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_telegram.ps1
 
 上面的频道 ID 是占位示例。Probe 归档最近五条；重复执行且消息没有变化时新增版本数应为零。Watch 首次以频道当前最新消息建立起点，此后每十秒读取更新；已归档消息与进度重启后保留。Probe 不修改 Watch 起点。每轮重新核对最近二十条，捕获此范围内的编辑，并重试失败图片；不是完整历史同步或无限期后台服务。`-Seconds 0` 可持续运行，关闭终端即停止。被删除的源消息、二十条之外的历史编辑，以及账号不能访问的内容不在本阶段恢复范围内。
 
+## 时间窗口入库与审计
+
+`History` 一次性扫描选定频道最近 24 小时。群内指定话题使用 Telegram 原生话题查询；`-Topic` 是话题顶层消息 ID，不是另一个频道 ID。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_telegram.ps1 -Action History -Channel '-1001234567890' -Topic 123 -Hours 24
+```
+
+以上 ID 为占位示例。不传 `-Topic` 则读取该频道或群组本身。`-Hours` 支持 1..720；`-Until '2026-11-25T13:00:00+00:00'` 固定结束时刻，窗口包含开始时刻、不包含结束时刻。时间必须带时区。History 不受 `-Limit` 影响，会翻页至早于窗口的消息或 API 返回结束，且不修改 Watch 进度。
+
+每条源消息写入后重新核对数据库正文、时间、编辑版本、话题 ID 和内容哈希；图片核对文件存在与 SHA-256。异常中止会保留已写入的数据，审计标记失败；图片缺失或正文未写入会以非零退出，不能当作验证通过。视频、文件仍只归档元数据。
+
+`data/telegram/audits/` 保存每次运行的独立 JSON，包含窗口、话题、源消息清单、数据库行号、内容哈希、附件状态、读取/写入/验证数量、停止边界与错误。`*-latest.json` 是最近尝试，`*-latest-success.json` 是最近成功结果。重复使用同一 `-Until` 和 `-Hours`，会比较最近成功扫描，列出新增、内容变化、源端不再返回的消息；源端变化不会删除本地原文版本。中断后的 `running` 或 `failed` 审计不能作为覆盖完成证明，可用相同窗口重跑补齐。
+
+这是可访问内容与本地存储的一致性核验；采集之前已删除或账号无权访问的消息无法由这套接口证明或恢复。History 为单次验证，不会自动启动定时任务或 QQ 转发。
+
 ## 数据与验收
 
 - `data/telegram/archive.sqlite`：`telegram_messages` 保存原文和编辑版本；`telegram_attachments` 保存附件状态；`telegram_channel_state` 保存 Watch 进度。
@@ -39,6 +55,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_telegram.ps1
 - 消息按频道 ID、消息 ID、内容哈希去重；不同频道中相同消息编号彼此独立。重新采集不会覆盖已保存的原文版本。
 - 本阶段只下载图片，单张最大 25 MB，下载超时为 60 秒；视频、文件仅归档类型和大小。图片失败不删除正文，错误只记录类型，不输出正文、验证码、API hash 或会话内容。
 - `Status` 的 `authorized=true` 证明会话授权；`Probe` 的读取数和 SQLite 记录证明数据访问。附件须满足 `status='saved'`、文件存在且 SHA-256 一致，才能确认原图已落盘。
-- QQ 尚未接入 Telegram；确认频道和入库正确后再增加来源适配，共用现有 bot 和按群发送限频。
+- 单条文字验证可运行 `node scripts/telegram/send_qq_sample.cjs TG1 -1004472038576 13613 77695 --preview`。目标必须已绑定、没有 Discord 频道配置，消息须匹配成功话题审计且无附件。确认预览后，在内存中加载现有加密 QQ 凭据并使用 `--send`，复用 QQ 发送器及发送记录；Telegram 消息和话题使用 `telegram:` 命名空间，任何既有发送尝试均拒绝重发。该命令不启动自动转发。
 
-运行归档与加密测试：`python -m unittest discover -s test -p test_telegram_archive.py`。
+运行归档、加密和时间窗口审计测试：`python -m unittest discover -s test -p 'test_telegram_*.py'`。

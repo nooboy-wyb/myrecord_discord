@@ -117,10 +117,17 @@ def normalize(entity, message):
         kind = "image" if mime_type.startswith("image/") and not message.sticker else "document"
         attachments.append({"media_id": str(document.id), "kind": kind,
                             "mime_type": mime_type, "size": document.size})
+    reply = getattr(message, "reply_to", None)
+    topic_id = None
+    if reply and getattr(reply, "forum_topic", False):
+        topic_id = getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None)
     return {"source": "telegram", "peer_id": str(utils.get_peer_id(entity)),
             "channel_name": entity.title, "message_id": str(message.id),
             "source_timestamp": timestamp(message.date), "edit_timestamp": timestamp(message.edit_date),
             "grouped_id": str(message.grouped_id) if message.grouped_id else None,
+            "topic_id": str(topic_id) if topic_id else None,
+            "reply_to_message_id": str(reply.reply_to_msg_id) if reply and reply.reply_to_msg_id else None,
+            "post_author": getattr(message, "post_author", None),
             "body_raw": message.raw_text or "", "attachments": attachments}
 
 
@@ -242,6 +249,11 @@ async def run(args):
             await probe(client, folder, args)
         elif args.action == "watch":
             await watch(client, folder, args)
+        elif args.action == "history":
+            from history import history
+
+            entity = await resolve_channel(client, args.channel)
+            await history(client, folder, args, save_message, entity, normalize)
         return 0
     finally:
         await client.disconnect()
@@ -249,17 +261,24 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Telegram login and SQLite archive validation; QQ forwarding is disabled")
-    parser.add_argument("action", choices=["configure", "login", "status", "dialogs", "probe", "watch"])
+    parser.add_argument("action", choices=["configure", "login", "status", "dialogs", "probe", "watch", "history"])
     parser.add_argument("--data-dir", type=Path, default=Path(__file__).resolve().parents[2] / "data" / "telegram")
     parser.add_argument("--channel", help="Selected signed peer_id from the dialogs command")
-    parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--limit", type=int, default=5, help="probe/dialogs cap; history scans the entire time window")
     parser.add_argument("--seconds", type=int, default=60)
+    parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument("--until", help="Exclusive ISO-8601 history end time, including UTC offset")
+    parser.add_argument("--topic", type=int, help="Forum topic top message ID for history")
     parser.add_argument("--login-method", choices=["qr", "phone"], default="qr")
     args = parser.parse_args()
-    if args.action in {"probe", "watch"} and not re.fullmatch(r"-\d+", args.channel or ""):
-        parser.error("probe/watch requires --channel with a signed peer ID from dialogs")
+    if args.action in {"probe", "watch", "history"} and not re.fullmatch(r"-\d+", args.channel or ""):
+        parser.error("probe/watch/history requires --channel with a signed peer ID from dialogs")
     if not 1 <= args.limit <= 1000 or args.seconds < 0:
         parser.error("limit must be 1..1000 and seconds must be nonnegative")
+    if not 1 <= args.hours <= 720:
+        parser.error("hours must be 1..720")
+    if args.topic is not None and (args.action != "history" or args.topic < 1):
+        parser.error("a positive --topic is supported only for history")
     logging.basicConfig(level=logging.WARNING)
     try:
         return asyncio.run(run(args))
