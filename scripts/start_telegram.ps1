@@ -68,8 +68,16 @@ try {
         if ($PSBoundParameters.ContainsKey('Topic')) { $telegramArguments += @('--topic', [string]$Topic) }
     }
     if ($Action -eq 'Login') { $telegramArguments += @('--login-method', $LoginMethod) }
-    & $runtime @telegramArguments
-    if ($LASTEXITCODE -ne 0) { throw "Telegram $Action exited with code $LASTEXITCODE" }
+    $previousErrorAction = $ErrorActionPreference
+    $telegramExitCode = -1
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $runtime @telegramArguments
+        $telegramExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($telegramExitCode -ne 0) { throw "Telegram $Action exited with code $telegramExitCode" }
 } finally {
     $env:TELEGRAM_PROXY = $previousProxy
     $env:PYTHONIOENCODING = $previousEncoding
