@@ -36,7 +36,9 @@ Ctrl+C 停止所在终端的进程。也可用 `stop_qq_sender.ps1` 单独停止
 
 复制 `scripts/telegram/sources.example.json` 到 `data/telegram/sources.json`。示例包含已选的 Yekoi发言、Yekoi策略和 Yekoi → ye-koi盘中状态更新，默认全部禁用。为需要启用的来源设置 `enabled:true` 和带时区的 `enabled_at`，例如 `2026-11-25T22:00:00+08:00`。这个时间只是格式示例，实际启用时填写希望开始采集、发送的时刻。
 
-`peer_id` 区分频道/群，`topic_id` 区分群内话题；指定话题还要提供准确的 `topic_title`。不允许同一个群的整群订阅与单个话题订阅重叠。`target:TG1` 引用已有 `qq-additional-routes.json` 中的群绑定，配置中不填写 Bot 密钥。目标必须已经有 OpenID 且自身的 `channel_ids` 为空。修改来源配置在下一轮生效；已排队的任务在发送前仍会重新检查来源是否启用和群绑定是否匹配。
+`peer_id` 区分频道/群，`topic_id` 区分群内话题；指定话题还要提供准确的 `topic_title`。不允许同一个群的整群订阅与单个话题订阅重叠。`target:TG1` 引用已有 `qq-additional-routes.json` 中的群绑定，配置中不填写 Bot 密钥。目标必须已经有 OpenID，默认要求自身的 `channel_ids` 为空；同时接收 DC 的目标须显式设置 `allow_mixed_sources:true`，并提供不重复的有效 DC 频道编号。TG2 的 RA 路由使用此配置。修改来源配置在下一轮生效；已排队的任务在发送前仍会重新检查来源是否启用和群绑定是否匹配。
+
+`scripts/qq_channels/yekoi/` 将指定话题的 QQ 标题统一为 `Yekoi盘中状态更新`，并在规划和发送前跳过已停用的 `telegram:-1003432435785:all` 来源。该发送规则不停止 TG 归档，也不影响其他来源。
 
 采集器与发送器默认读取同一份 `data/telegram/sources.json`。`Monitor -Config` 仅用于单独采集验证；生产联动使用默认文件，否则发送器不会自动读取另一个路径。
 
@@ -72,6 +74,10 @@ DC 健康状态包含最后入库时间和收到条数。QQ 状态包含 Gateway
 
 Node 日志分别写入 `data/logs/collector-YYYY-MM-DD.log` 和 `qq-sender-YYYY-MM-DD.log`。TG 在终端输出每轮摘要，同时原子更新 `monitor-status.json`。浏览器原有暂停、恢复和补发控制仍请求 8765，由采集器代理到发送器；发送器离线返回 503，消息入库仍可用。
 
+QQ 日志按 `connection_id` 关联握手、心跳、断线与恢复。`连接错误` 记录运行时提供的异常名、错误码和有界 cause 链；`连接关闭` 即使发生在错误之后也保留关闭码、原因和 `was_clean`，不重复安排重连。异常信息中的凭据、会话标识和 URL 会脱敏；运行时没有提供原因时标为 `available:false`，不推测为 ECONNRESET。
+
+`heartbeat_late_ms` 表示心跳定时任务实际晚执行多久，延迟达到一秒时另记警告。`event_loop_max_ms` 和 `event_loop_p99_ms` 是本连接期间 Node 事件循环延迟采样，单位毫秒；会话结束时停止采样并记录摘要。调度延迟与事件循环延迟同时升高提示本机繁忙或阻塞；调度正常时仍出现连接错误需继续排查网络和 QQ 服务端。`RESUMED` 证明会话恢复，后续 `心跳确认` 才能进一步证明连接持续响应。这些记录写入 QQ 发送器日志，不依赖 Discord 网页刷新。
+
 DC 入库遇到临时存储故障返回 503，扩展保留原消息并按频道退避重试；身份、时间戳或 JSON 校验失败仍返回 400。采集、附件下载和发送器读取日归档时最多等待 SQLite 锁五秒；发送规划遇到数据库繁忙会在下一轮重试，不因此永久暂停。扩展 0.2.62 清理成功重试后遗留的唤醒定时器，原有频道扫描、去重规则和页面恢复逻辑保持不变。
 
 ## 本地验证
@@ -87,6 +93,6 @@ node --test @nodeTests
 & $env:MUSE_TEST_PYTHON -m unittest discover -s test -p 'test_telegram_*.py'
 ```
 
-没有 `MUSE_TEST_PYTHON` 时跨语言三进程测试会明确跳过。所有进程可通过 `MUSE_DATA_DIR` 使用另一个数据根目录；HTTP 端口分别用 `MUSE_COLLECTOR_PORT`、`MUSE_QQ_PORT` 覆盖。上线时要先停止旧的混合 DC+QQ 进程，再启动这三个进程；本次仅做本地验证，不修改远端运行状态。
+没有 `MUSE_TEST_PYTHON` 时跨语言三进程测试会明确跳过。所有进程可通过 `MUSE_DATA_DIR` 使用另一个数据根目录；HTTP 端口分别用 `MUSE_COLLECTOR_PORT`、`MUSE_QQ_PORT` 覆盖。首次从旧的混合 DC+QQ 进程迁移时，要先停止旧进程，再启动这三个进程。运行测试使用隔离数据，不修改远端运行状态。
 
-2026-11-26 本地完整回归通过 69 项 Node 测试和 26 项 Python 测试，无排除或跳过。此前两个扩展测试的响应模拟、旧退避字段和测试等待顺序已修正，均纳入完整回归。结果覆盖本地故障注入与模拟传输；远端尚未部署此版本，真实浏览器采集和 QQ 网络仍需部署后核验。
+2026-11-26 本地完整回归通过 117 项 Node 测试和 28 项 Python 测试，无排除或跳过，覆盖 Gateway 诊断、时间戳补全与异常记录、RA 与 TG 共群、Yekoi 发送规则及有限恢复监控。三个业务进程已在远端拆分运行，RA 扩展 v0.2.64 和发送路由已单独部署验证；本次 GitHub 发布不部署其余本地改动，远端尚未安装新的服务监控计划任务。本地测试验证故障注入与模拟传输，线上状态仍须结合实际进程、扫描和 Gateway ACK 核验。

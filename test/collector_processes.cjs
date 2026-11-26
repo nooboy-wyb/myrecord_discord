@@ -13,6 +13,7 @@ const project = path.resolve(__dirname,'..');
 const channel = '1265882617530814535';
 const primaryChannel = '1381176601802440744';
 const liveChannel = '1571167749558902885';
+const raChannel = '1381634972372308060';
 const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
 async function freePort() {
   const server = net.createServer();
@@ -56,8 +57,7 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   write('qq-forward-controls.json',{primary_enabled:true,
     primary_channel_enabled_at:{[primaryChannel]:enabledAt,[liveChannel]:enabledAt}});
   write('qq-additional-routes.json',{routes:[
-    {name:'DC',group_openid:'SHARED',channel_ids:[channel],enabled_at:enabledAt},
-    {name:'TG1',group_openid:'SHARED',channel_ids:[],enabled_at:enabledAt}
+    {name:'TG1',group_openid:'SHARED',channel_ids:[channel,raChannel],allow_mixed_sources:true,enabled_at:enabledAt}
   ]});
   write('telegram/sources.json',{sources:[{enabled:true,peer_id:'-1001',topic_id:13,topic_title:'Topic',target:'TG1',enabled_at:enabledAt}]});
   const env = {...process.env,MUSE_DATA_DIR:root,MUSE_COLLECTOR_PORT:String(collectorPort),MUSE_QQ_PORT:String(senderPort),
@@ -92,15 +92,15 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   await until(() => health(senderPort));
   assert.equal((await health(senderPort)).online,false);
   assert.equal((await fetch(`http://127.0.0.1:${senderPort}/v1/health`)).status,401);
-  async function capture(id,channelId = channel) {
+  async function capture(id,channelId = channel,missingTime = false) {
     const now = Date.now();
     const sourceId = ((BigInt(now)-1420070400000n)<<22n)+BigInt(id);
     const response = await request(collectorPort,'/v1/messages',{source:'discord_web',channel_id:channelId,
-      source_message_id:String(sourceId),channel_name:'DC fixture',source_timestamp:new Date(now).toISOString(),
+      source_message_id:String(sourceId),channel_name:channelId === raChannel ? 'RA' : 'DC fixture',source_timestamp:missingTime ? null : new Date(now).toISOString(),
       body_raw:`DC fixture ${id}`,attachments:[]});
     assert.equal(response.status,200,await response.text());
   }
-  await capture(1);
+  await capture(1,channel,true);
   await collectTelegram(1);
   await until(async () => (await health(senderPort)).outbox.reduce((count,item) => count+Number(item.count),0) === 2);
   assert.equal(fs.existsSync(path.join(root,'mock-sends.jsonl')),false);
@@ -109,8 +109,9 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   await collectTelegram(2);
   await stop(telegram);
   await capture(3,primaryChannel);
-  await capture(4,liveChannel);
-  assert.equal((await health(collectorPort)).received,4);
+  await capture(4,liveChannel,true);
+  await capture(5,raChannel);
+  assert.equal((await health(collectorPort)).received,5);
   const unavailable = await request(collectorPort,`/v1/forwarding/status?channel_id=${channel}`);
   assert.equal(unavailable.status,503);
   const archive = new DatabaseSync(path.join(root,'telegram','archive.sqlite'),{readOnly:true});
@@ -121,14 +122,19 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   await until(async () => (await health(senderPort))?.online);
   await until(async () => {
     const status = await health(senderPort);
-    return !status.running && status.outbox.reduce((count,item) => count+(item.status === 'accepted' ? Number(item.count) : 0),0) === 6;
+    return !status.running && status.outbox.reduce((count,item) => count+(item.status === 'accepted' ? Number(item.count) : 0),0) === 7;
   });
   const sends = () => fs.readFileSync(path.join(root,'mock-sends.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(sends().length,6,output.join('').slice(-4000));
-  assert.equal(new Set(sends().map(item => item.payload.content)).size,6);
+  assert.equal(sends().length,7,output.join('').slice(-4000));
+  assert.equal(new Set(sends().map(item => item.payload.content)).size,7);
+  const raSends = sends().filter(item => item.payload.content.includes('🔵RA'));
+  assert.equal(raSends.length,1);
+  assert.equal(raSends[0].group_openid,'SHARED');
+  assert.equal(sends().filter(item => item.payload.content.includes('（由消息 ID 推算）')).length,2);
+  assert.equal((await health(senderPort)).timestamps.detected.DC_TIMESTAMP_MISSING,2);
   for (const group of ['PRIMARY','SHARED']) {
     const messages = sends().filter(item => item.group_openid === group);
-    assert.equal(messages.length,group === 'PRIMARY' ? 2 : 4);
+    assert.equal(messages.length,group === 'PRIMARY' ? 2 : 5);
     for (let index = 1; index < messages.length; index++) assert.ok(messages[index].at-messages[index-1].at >= 1990);
   }
   const proxy = await request(collectorPort,`/v1/forwarding/status?channel_id=${channel}`);
@@ -139,7 +145,11 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   sender = launch(process.execPath,['--require',preload,'scripts/qq/sender.cjs']);
   await until(async () => (await health(senderPort))?.online);
   await pause(5500);
-  assert.equal(sends().length,6,'restart must not replay accepted messages');
+  assert.equal(sends().length,7,'restart must not replay accepted messages');
+  const diagnostics = new DatabaseSync(path.join(root,'collector-diagnostics.sqlite'),{readOnly:true});
+  assert.equal(diagnostics.prepare("SELECT COUNT(*) AS n FROM collector_diagnostic_events WHERE code='DC_TIMESTAMP_MISSING'").get().n,2,
+    'archive rescans and sender restart must not duplicate timestamp diagnostics');
+  diagnostics.close();
   assert.equal(collector.exitCode,null);
   assert.notEqual(telegram.signalCode,null);
 });

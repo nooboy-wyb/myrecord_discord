@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const {normalizeSourceTimestamp} = require('./source_timestamp.cjs');
 
 function createOutbox({state,send,allowed = () => true,onAccepted = () => {},now = Date.now}) {
   state.exec(`CREATE TABLE IF NOT EXISTS sender_outbox (
@@ -28,12 +29,13 @@ function createOutbox({state,send,allowed = () => true,onAccepted = () => {},now
     return row && ['accepted','skipped_duplicate','skipped_attachment','blocked_source','unknown'].includes(row.status);
   }
   function enqueue(message,context) {
+    message = normalizeSourceTimestamp(message);
     const key = taskKey(message,context);
     state.prepare(`INSERT INTO sender_outbox
       (task_key,source,group_openid,channel_id,source_message_id,source_timestamp,message_json,context_json,status,updated_at)
       VALUES (?,?,?,?,?,?,?,?,'queued',?) ON CONFLICT(task_key) DO UPDATE SET
       next_attempt_at=CASE WHEN sender_outbox.message_json<>excluded.message_json THEN 0 ELSE sender_outbox.next_attempt_at END,
-      message_json=excluded.message_json,context_json=excluded.context_json
+      source_timestamp=excluded.source_timestamp,message_json=excluded.message_json,context_json=excluded.context_json
       WHERE sender_outbox.status IN ('queued','deferred')`)
       .run(key,message.source_message_id.startsWith('telegram:') ? 'telegram' : 'discord',context.group_openid,
         message.channel_id,message.source_message_id,message.source_timestamp,

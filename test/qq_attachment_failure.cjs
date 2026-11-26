@@ -7,6 +7,7 @@ const {DatabaseSync} = require('node:sqlite');
 const {test} = require('node:test');
 const liuyudong = require('../scripts/qq_channels/liuyudong/index.cjs');
 const {createOutbox} = require('../scripts/qq/core/outbox.cjs');
+const {resolveSourceTimestamp} = require('../scripts/qq/core/source_timestamp.cjs');
 
 const source = fs.readFileSync(require.resolve('../scripts/qq/core/forwarder.cjs'),'utf8');
 const section = (start,end) => source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
@@ -49,7 +50,7 @@ function fixture(t) {
     yanchi:{channelIds:[],fanwanChannelId:'fan',afterSend:()=>{}},
     groupCooldownUntil:new Map(),rateLimitCooldownMs:120000,pausedGroups:new Set(),reportedUnconfirmed:new Set(),
     primaryControl:()=>({}),primaryAcceptsMessage:()=>true,additionalTargets:()=>[],pendingMessages:()=>messages,
-    sourceTime:item=>Date.parse(item.source_timestamp),liveWatermark:()=>null,isAfterLiveWatermark:()=>true,
+    sourceTime:item=>resolveSourceTimestamp(item)?.time ?? NaN,liveWatermark:()=>null,isAfterLiveWatermark:()=>true,
     advanceLiveWatermark:(group,item)=>advanced.push(item.source_message_id),
     manualRecovery:{processNext:async()=>{}},messageHeading:()=> 'heading',sourceTimeLabel:()=>'',
     post:async endpoint=>{requests.push(endpoint);return endpoint==='files'?{file_info:'file'}:{id:'accepted'};},
@@ -122,6 +123,36 @@ test('temporary archive contention retries planning without permanently pausing 
   assert.deepEqual(requests,['messages']);
 });
 
+test('a grouped message with no DOM time cannot block a later primary channel message',async t=>{
+  const {state,api,context,messages,requests} = fixture(t);
+  const first = {...message('1575373315126595588'),source_timestamp:null,channel_id:'exchange'};
+  const next = {...message('1575373324362453093'),channel_id:'primary-channel'};
+  context.additionalTargets = () => [{group_openid:'additional',channel_ids:['exchange']}];
+  context.primaryAcceptsMessage = (control,item) => item.channel_id === 'primary-channel';
+  context.routeAcceptsMessage = (route,item) => route.channel_ids.includes(item.channel_id);
+  messages.push(first,next);
+  await api.tick();
+  assert.equal(context.paused,false);
+  assert.equal(context.plannerStatus.discord.ok,true);
+  assert.deepEqual(requests,['messages','messages']);
+  assert.equal(state.prepare("SELECT COUNT(*) AS n FROM sender_outbox WHERE status='accepted'").get().n,2);
+});
+
+test('a planner error does not pause queued sends and the next tick can recover',async t=>{
+  const {api,context,requests} = fixture(t);
+  context.alerts = {notify:() => {}};
+  context.outbox.enqueue(message('1568956663539695798'),{group_openid:'primary'});
+  context.pendingMessages = () => {throw Error('synthetic planner failure');};
+  await api.tick();
+  assert.equal(context.paused,false);
+  assert.equal(context.plannerStatus.discord.error,'synthetic planner failure');
+  assert.deepEqual(requests,['messages']);
+  context.pendingMessages = () => [message('1568956663539695799')];
+  await api.tick();
+  assert.equal(context.plannerStatus.discord.ok,true);
+  assert.deepEqual(requests,['messages','messages']);
+});
+
 test('archive reads yield to gateway callbacks before processing the whole archive',async()=>{
   const messages = Array.from({length:600},(_,index)=>({id:index}));
   let processed = 0,processedAtCallback = null;
@@ -133,6 +164,7 @@ test('archive reads yield to gateway callbacks before processing the whole archi
   const context = vm.createContext({DatabaseSync:FixtureDatabase,setImmediate,
     state:{prepare:()=>({get:()=>({value:'2026-11-01T00:00:00Z'})})},
     sourceFiles:()=>['fixture'],sourceTime:()=>0,
+    timestampDiagnostics:{inspect:()=>{}},
     attachmentFiles:()=>{
       if (++processed === 1) setImmediate(()=>{processedAtCallback=processed;});
       return [];

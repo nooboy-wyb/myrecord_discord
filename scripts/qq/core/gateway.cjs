@@ -1,6 +1,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {randomUUID} = require('node:crypto');
+const {monitorEventLoopDelay} = require('node:perf_hooks');
+const {safeGatewayText,gatewayError} = require('./gateway_diagnostics.cjs');
 
 const appId = process.env.QQ_BOT_APP_ID?.trim();
 const secret = process.env.QQ_BOT_APP_SECRET?.trim();
@@ -35,6 +37,8 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
   const socket = new WebSocket(gateway.url);
   const connectionId = randomUUID().slice(0,8);
   const startedAt = Date.now();
+  const loopDelay = monitorEventLoopDelay({resolution:20});
+  loopDelay.enable();
   let heartbeat;
   let authenticationTimeout;
   let heartbeatInterval = null;
@@ -42,9 +46,18 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
   let lastAckAt = null;
   let heartbeatSent = 0;
   let heartbeatAcked = 0;
+  let nextHeartbeatAt = null;
+  let heartbeatLateMaxMs = 0;
   let readyAt = null;
   let retired = false;
+  let closeLogged = false;
   let savedGroup = fs.existsSync(path.join(dataDir, 'qq-group-openid.json'));
+  const sensitiveValues = new Set([secret,authorization,credential.access_token,session.id].filter(Boolean));
+  const redactions = () => [...sensitiveValues,session.id];
+  const timing = () => ({heartbeat_late_max_ms:heartbeatLateMaxMs,
+    event_loop_max_ms:loopDelay.count ? Math.round(loopDelay.max/1e4)/100 : null,
+    event_loop_p99_ms:loopDelay.count ? Math.round(loopDelay.percentile(99)/1e4)/100 : null,
+    pending_heartbeat_age_ms:pendingHeartbeatAt == null ? null : Date.now()-pendingHeartbeatAt});
   const resetSession = () => {
     session.id = null;
     session.sequence = null;
@@ -54,6 +67,7 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
     retired = true;
     clearInterval(heartbeat);
     clearTimeout(authenticationTimeout);
+    loopDelay.disable();
     const now = Date.now();
     if (reset) resetSession();
     if (session.disconnectedAt == null) session.disconnectedAt = now;
@@ -62,15 +76,21 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
       connection_ms:now-startedAt,online_ms:readyAt == null ? 0 : now-readyAt,
       heartbeat_interval_ms:heartbeatInterval,heartbeat_sent:heartbeatSent,
       heartbeat_acked:heartbeatAcked,last_ack_age_ms:lastAckAt == null ? null : now-lastAckAt,
-      reconnect_delay_ms:delay})}`);
+      reconnect_delay_ms:delay,...timing()})}`);
     if (closeSocket) {
       try { socket.close(1000,'reconnect'); }
-      catch (error) { console.warn(`QQ Gateway 关闭旧连接失败：${error.message}`); }
+      catch (error) { console.warn(`QQ Gateway 关闭旧连接失败：${JSON.stringify({
+        connection_id:connectionId,error:gatewayError(error,redactions())})}`); }
     }
     if (reconnect) setTimeout(reconnect,delay);
   }
   function sendHeartbeat() {
     if (retired || socket.readyState !== WebSocket.OPEN) return;
+    const lateMs = Math.max(0,Date.now()-nextHeartbeatAt);
+    heartbeatLateMaxMs = Math.max(heartbeatLateMaxMs,lateMs);
+    nextHeartbeatAt = Date.now()+heartbeatInterval;
+    if (lateMs >= 1000) console.warn(`QQ Gateway 心跳调度延迟：${JSON.stringify({
+      connection_id:connectionId,heartbeat_late_ms:lateMs,...timing()})}`);
     if (pendingHeartbeatAt != null) {
       console.warn(`QQ Gateway 心跳确认超时：${JSON.stringify({connection_id:connectionId,
         waited_ms:Date.now()-pendingHeartbeatAt,heartbeat_interval_ms:heartbeatInterval})}`);
@@ -81,9 +101,11 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
       pendingHeartbeatAt = Date.now();
       socket.send(JSON.stringify({op:1,d:session.sequence ?? null}));
       heartbeatSent++;
-      console.log(`QQ Gateway 心跳发送：${JSON.stringify({connection_id:connectionId,heartbeat_sent:heartbeatSent})}`);
+      console.log(`QQ Gateway 心跳发送：${JSON.stringify({connection_id:connectionId,
+        heartbeat_sent:heartbeatSent,heartbeat_late_ms:lateMs})}`);
     } catch (error) {
-      console.warn(`QQ Gateway 心跳发送失败：${error.message}`);
+      console.warn(`QQ Gateway 心跳发送失败：${JSON.stringify({connection_id:connectionId,
+        error:gatewayError(error,redactions()),...timing()})}`);
       finish('HEARTBEAT_SEND_FAILED',5000);
     }
   }
@@ -136,17 +158,20 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
           intents:1 << 25,shard:[0,1],
           properties:{$os:'windows',$browser:'muse',$device:'muse'}}}));
       } catch (error) {
-        console.warn(`QQ Gateway 鉴权发送失败：${error.message}`);
+        console.warn(`QQ Gateway 鉴权发送失败：${JSON.stringify({connection_id:connectionId,
+          error:gatewayError(error,redactions()),...timing()})}`);
         finish('AUTHENTICATION_SEND_FAILED',5000);
         return;
       }
       console.log(`QQ Gateway 会话握手：${JSON.stringify({connection_id:connectionId,
         mode:resume ? 'resume' : 'identify',heartbeat_interval_ms:interval})}`);
+      nextHeartbeatAt = Date.now()+interval;
       heartbeat = setInterval(sendHeartbeat,interval);
       return;
     }
     if (packet.op === 0 && ['READY','RESUMED'].includes(packet.t)) {
       if (packet.t === 'READY') session.id = typeof packet.d?.session_id === 'string' ? packet.d.session_id : null;
+      if (session.id) sensitiveValues.add(session.id);
       clearTimeout(authenticationTimeout);
       readyAt = Date.now();
       console.log(`QQ Gateway 会话就绪：${JSON.stringify({connection_id:connectionId,event:packet.t,
@@ -197,14 +222,19 @@ async function main(onState = () => {}, reconnect = null, session = {}) {
       } catch (error) { console.error(`附加群绑定失败：${error.message}`); }
     }
   });
-  socket.addEventListener('error', () => {
+  socket.addEventListener('error', event => {
     if (retired) return;
-    console.error('QQ WebSocket 连接失败；请检查网络、机器人状态和开发设置。');
+    console.error(`QQ Gateway 连接错误：${JSON.stringify({connection_id:connectionId,
+      error:gatewayError(event?.error || event,redactions()),socket_state:socket.readyState,...timing()})}`);
     finish('SOCKET_ERROR',5000);
   });
   socket.addEventListener('close', event => {
+    if (closeLogged) return;
+    closeLogged = true;
+    console.log(`QQ Gateway 连接关闭：${JSON.stringify({connection_id:connectionId,
+      close_code:event.code,close_reason:safeGatewayText(event.reason,redactions()),
+      was_clean:event.wasClean ?? null,after_finish:retired,...timing()})}`);
     if (retired) return;
-    console.error(`QQ WebSocket 已断开，代码 ${event.code}${event.reason ? `，原因 ${event.reason}` : ''}。`);
     finish(`SOCKET_CLOSE_${event.code}`,5000,[4006,4007,4009].includes(event.code),false);
   });
 }
@@ -215,7 +245,8 @@ function startGateway(onState = () => {}) {
   const session = {};
   const connect = () => main(onState, connect, session).catch(error => {
     onState(false);
-    console.error(`QQ Gateway 连接失败：${error.message}。10 秒后重试。`);
+    console.error(`QQ Gateway 连接失败：${JSON.stringify({error:gatewayError(error,[secret,session.id]),
+      reconnect_delay_ms:10000})}`);
     setTimeout(connect, 10000);
   });
   connect();

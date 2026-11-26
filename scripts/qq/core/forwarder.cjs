@@ -10,11 +10,13 @@ const tia = require('../../qq_channels/tia/index.cjs');
 const {createManualRecovery} = require('./manual_recovery.cjs');
 const {decorateChannelLabel} = require('./channel_title_style.cjs');
 const {createOutbox} = require('./outbox.cjs');
+const {resolveSourceTimestamp} = require('./source_timestamp.cjs');
+const {createTimestampDiagnostics} = require('./timestamp_diagnostics.cjs');
 const {createSourceIdentityGuard} = require('./source_identity.cjs');
 const {planTelegram,telegramAllowed} = require('./telegram_source.cjs');
 const alerts = require('./alerts.cjs');
 const exchangeChannelId = '1265882617530814535';
-const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId]);
+const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId, '1381634972372308060']);
 
 const root = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', '..', 'data'));
 const target = JSON.parse(fs.readFileSync(path.join(root, 'qq-group-openid.json'), 'utf8'));
@@ -75,6 +77,7 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 const reportedUnconfirmed = new Set();
 const plannerStatus = {discord:{},telegram:{}};
+const timestampDiagnostics = createTimestampDiagnostics({save:saveDiagnostic});
 const sourceIdentity = createSourceIdentityGuard({sourceFiles});
 function pauseGroup(groupOpenid) {
   if (groupOpenid === target.group_openid) paused = true;
@@ -197,16 +200,16 @@ function routeAcceptsMessage(route, message) {
     && sourceTime(message) >= Date.parse(route.channel_enabled_at?.[message.channel_id] || route.enabled_at);
 }
 function sourceTime(message) {
-  const explicit = Date.parse(message.source_timestamp || '');
-  if (Number.isFinite(explicit)) return explicit;
-  try { return Number((BigInt(message.source_message_id) >> 22n) + 1420070400000n); }
-  catch { return NaN; }
+  return resolveSourceTimestamp(message)?.time ?? NaN;
 }
 function sourceTimeLabel(message) {
-  const time = sourceTime(message);
-  if (!Number.isFinite(time)) return '【时间未知】';
+  const resolved = resolveSourceTimestamp(message);
+  if (!resolved) return '【时间未知】';
+  const {time,origin} = resolved;
   const formatted = new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date(time));
-  return `【${formatted} UTC+8】${message.source_timestamp ? '' : '（由消息 ID 推算）'}`;
+  const note = origin === 'discord_snowflake' ? '（由消息 ID 推算）'
+    : origin === 'captured_plus_1s' ? '（采集时间+1秒估算）' : '';
+  return `【${formatted} UTC+8】${note}`;
 }
 function liveWatermark(groupOpenid, channelId) {
   const key = `live_watermark:${groupOpenid}:${channelId}`;
@@ -287,6 +290,7 @@ async function pendingMessages() {
         FROM discord_web_messages WHERE captured_at >= ? ORDER BY captured_at,id`).all(startAt);
       for (const message of messages) {
         if (++scannedMessages % 100 === 0) await new Promise(resolve => setImmediate(resolve));
+        timestampDiagnostics.inspect(message);
         if (!Number.isFinite(sourceTime(message))) continue;
         const attachments = attachmentFiles(db,message.id);
         rows.push({...message, attachments, file});
@@ -565,6 +569,7 @@ function health() {
   let telegramCollector = null;
   try { telegramCollector = JSON.parse(fs.readFileSync(monitorFile,'utf8')); } catch {}
   return {role:'qq-sender',online,running,planners:plannerStatus,outbox:outbox.status(),
+    timestamps:timestampDiagnostics.status(),
     telegram_collector:telegramCollector,at:new Date().toISOString()};
 }
 async function tick() {
@@ -663,10 +668,9 @@ async function tick() {
       plannerStatus.discord = {retrying:true,error:'Discord archive is busy; next tick will retry',at:new Date().toISOString()};
       console.warn('DC 归档暂时繁忙，下一轮重新规划待发消息。');
     } else {
-      paused = true;
       plannerStatus.discord = {error:error.message,at:new Date().toISOString()};
-      console.error(`QQ 转发暂停：${error.message}`);
-      alerts.notify(`tick:${error.message}`,`【QQ 转发告警】群 1 转发暂停：${error.message}。请检查本地服务日志。`);
+      console.error(`DC 待发消息规划失败，下一轮重试：${error.message}`);
+      alerts.notify(`tick:${error.message}`,`【QQ 转发告警】DC 待发消息规划失败，下一轮重试：${error.message}。请检查本地服务日志。`);
     }
   }
   try { if (online) await outbox.drain(); }

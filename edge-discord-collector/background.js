@@ -5,6 +5,7 @@ const requestedChannels = [
   {id:'1254782508793593947', label:'颜驰', marker:'addedYanchiMainChannelV1'},
   {id:'1381176601802440744', label:'熬鹰', marker:'addedAoyingChannelV1'},
   {id:'1571167749558902885', label:'熬鹰实盘', marker:'addedAoyingLiveChannelV1'},
+  {id:'1381634972372308060', label:'RA', marker:'addedRaChannelV1'},
   // https://discord.com/channels/1222459489333018634/1405206823727796408
   {id:'1405206823727796408', label:'风寻', marker:'addedFengxunChannelV2'},
   {id:'1296438667438719028', label:'颜驰 饭碗警报', marker:'addedYanchiFanwanChannelV1'},

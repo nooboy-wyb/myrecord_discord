@@ -100,3 +100,48 @@ test('TG rejects primary, unbound or ambiguous targets both when planning and be
     assert.equal(telegramAllowed(setup.root,jobs[0].message,jobs[0].context),false);
   }
 });
+
+test('one explicitly shared route keeps TG planning and send checks enabled alongside DC',t => {
+  const setup = fixture(t);
+  setup.insert(1);
+  const file = path.join(setup.root,'qq-additional-routes.json');
+  const route = JSON.parse(fs.readFileSync(file,'utf8')).routes[0];
+  route.channel_ids = ['1381634972372308060'];
+  const configure = () => fs.writeFileSync(file,JSON.stringify({routes:[route]}));
+  configure();
+  assert.equal(planTelegram(setup.root,() => assert.fail('sharing must be explicit')).blocked.length,1);
+  route.allow_mixed_sources = true;
+  configure();
+  const jobs = [];
+  assert.equal(planTelegram(setup.root,(message,context) => jobs.push({message,context})).queued,1);
+  assert.equal(telegramAllowed(setup.root,jobs[0].message,jobs[0].context),true);
+  for (const channelIds of [['invalid'],['1381634972372308060','1381634972372308060']]) {
+    route.channel_ids = channelIds;
+    configure();
+    assert.equal(planTelegram(setup.root,() => assert.fail('invalid mixed route')).blocked.length,1);
+    assert.equal(telegramAllowed(setup.root,jobs[0].message,jobs[0].context),false);
+  }
+});
+
+test('Yekoi rules preserve other sources and stop a disabled source before planning and sending',t => {
+  const {decorateChannelLabel} = require('../scripts/qq/core/channel_title_style.cjs');
+  assert.equal(decorateChannelLabel('telegram:-1004472038576:13613','old title'),'Yekoi盘中状态更新');
+  assert.equal(decorateChannelLabel('telegram:-1001:13','other topic'),'other topic');
+  assert.equal(decorateChannelLabel('1381634972372308060','RA'),'🔵RA');
+  const setup = fixture(t);
+  setup.insert(1);
+  const jobs = [];
+  assert.equal(planTelegram(setup.root,(message,context) => jobs.push({message,context})).queued,1);
+  assert.equal(telegramAllowed(setup.root,jobs[0].message,jobs[0].context),true);
+  setup.sources[0].peer_id = '-1003432435785';
+  setup.sources[0].topic_id = null;
+  setup.configure();
+  const row = setup.archive.prepare('SELECT payload_json FROM telegram_messages WHERE id=1').get();
+  const payload = {...JSON.parse(row.payload_json),peer_id:'-1003432435785',topic_id:null};
+  setup.archive.prepare('UPDATE telegram_messages SET peer_id=?,payload_json=? WHERE id=1')
+    .run(payload.peer_id,JSON.stringify(payload));
+  const status = planTelegram(setup.root,() => assert.fail('disabled Yekoi source must not enqueue'));
+  assert.equal(status.queued,0);
+  assert.equal(status.blocked.length,0);
+  assert.equal(telegramAllowed(setup.root,{...jobs[0].message,channel_id:'telegram:-1003432435785:all'},jobs[0].context),false);
+});

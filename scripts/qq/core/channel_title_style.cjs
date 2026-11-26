@@ -1,4 +1,6 @@
 // QQ presentation only. Discord capture and archived channel names stay unchanged.
+const yekoi = require('../../qq_channels/yekoi/index.cjs');
+
 const markers = new Map([
   ['1222944235691708477', '🟢'], // 柳玉东
   ['1224358019056271442', '🔵'], // 利润医生
@@ -8,11 +10,13 @@ const markers = new Map([
   ['1405206823727796408', '🔵'], // 风寻
   ['1381176601802440744', '🔴'], // 熬鹰
   ['1571167749558902885', '🔴'], // 熬鹰实盘
+  ['1381634972372308060', '🔵'],
 ]);
 
 function decorateChannelLabel(channelId, label) {
   const marker = markers.get(String(channelId));
-  return marker ? `${marker}${label}` : label;
+  const resolved = yekoi.labelFor(channelId, label);
+  return marker ? `${marker}${resolved}` : resolved;
 }
 
 module.exports = {decorateChannelLabel};

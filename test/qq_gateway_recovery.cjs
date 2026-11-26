@@ -14,6 +14,7 @@ async function harness({routes = []} = {}) {
   const states = [];
   const logs = [];
   const requests = [];
+  const monitors = [];
   const files = new Map([
     ['qq-group-openid.json', JSON.stringify({group_openid:'PRIMARY'})],
     ['qq-additional-routes.json', JSON.stringify({routes})]
@@ -47,6 +48,13 @@ async function harness({routes = []} = {}) {
     }
       : ['path','node:path'].includes(name) ? path
       : ['crypto','node:crypto'].includes(name) ? {randomUUID:() => `connection-${sockets.length}`}
+      : name === 'node:perf_hooks' ? {monitorEventLoopDelay:() => {
+        const monitor = {count:1,max:20e6,enabled:false,percentile:() => 20e6,
+          enable() {this.enabled = true;},disable() {this.enabled = false;}};
+        monitors.push(monitor);
+        return monitor;
+      }}
+      : name === './gateway_diagnostics.cjs' ? require('../scripts/qq/core/gateway_diagnostics.cjs')
       : {bindingCode:() => null},
     __dirname:path.resolve('scripts/qq/core'),module:{exports:{}},Date:Clock,AbortSignal,
     process:{env:{QQ_BOT_APP_ID:'123',QQ_BOT_APP_SECRET:'fake-secret'}},
@@ -86,7 +94,8 @@ async function harness({routes = []} = {}) {
   }
   context.module.exports.startGateway(value => states.push(value));
   await settle();
-  return {sockets,timers,states,logs,advance,hello,ready,files,requests};
+  return {sockets,timers,states,logs,advance,hello,ready,files,requests,monitors,
+    elapseWithoutTimers:ms => {clock += ms;}};
 }
 
 test('silent binding saves TG1 OpenID only for its binding message and sends no confirmation',async() => {
@@ -204,4 +213,64 @@ test('handshake timeout and socket error cannot schedule duplicate reconnects',a
   setup.sockets[1].handlers.close({code:1006});
   await setup.advance(5000);
   assert.equal(setup.sockets.length,3);
+});
+
+test('socket errors retain sanitized causes and the subsequent close code without reconnecting twice',async() => {
+  const setup = await harness();
+  setup.hello(); setup.ready();
+  const socket = setup.sockets[0];
+  socket.handlers.error({error:Object.assign(Error('socket failed QQBot fake-token'),{
+    cause:Object.assign(Error('read ECONNRESET wss://example.invalid/?token=hidden fake-secret fake-session'),{code:'ECONNRESET'})
+  })});
+  socket.handlers.close({code:1006,reason:'session_id=hidden fake-session',wasClean:false});
+  socket.handlers.close({code:1006});
+  assert.equal(setup.monitors[0].enabled,false);
+  const failure = JSON.parse(setup.logs.find(line => line.startsWith('QQ Gateway 连接错误：')).split('：')[1]);
+  assert.equal(failure.error.details[1].code,'ECONNRESET');
+  const closes = setup.logs.filter(line => line.startsWith('QQ Gateway 连接关闭：'));
+  assert.equal(closes.length,1);
+  const closed = JSON.parse(closes[0].split('：')[1]);
+  assert.equal(closed.close_code,1006);
+  assert.equal(closed.was_clean,false);
+  assert.equal(closed.after_finish,true);
+  assert(setup.logs.every(line => !/fake-token|fake-secret|fake-session|hidden|example\.invalid/.test(line)));
+  await setup.advance(5000);
+  assert.equal(setup.sockets.length,2);
+  assert.equal(setup.monitors.filter(monitor => monitor.enabled).length,1);
+});
+
+test('late heartbeat logs scheduling and event loop delay while retaining normal ACK recovery',async() => {
+  const setup = await harness();
+  setup.hello(); setup.ready();
+  setup.monitors[0].max = 17020e6;
+  setup.elapseWithoutTimers(62000);
+  [...setup.timers.values()].find(timer => timer.interval).callback();
+  const late = JSON.parse(setup.logs.find(line => line.startsWith('QQ Gateway 心跳调度延迟：')).split('：')[1]);
+  assert.equal(late.heartbeat_late_ms,17000);
+  assert.equal(late.event_loop_max_ms,17020);
+  setup.sockets[0].packet({op:11});
+  setup.sockets[0].packet({op:7});
+  assert(setup.logs.some(line => line.includes('"heartbeat_late_max_ms":17000')
+    && line.includes('"heartbeat_sent":1,"heartbeat_acked":1')));
+  assert.equal(setup.monitors[0].enabled,false);
+});
+
+test('socket errors without runtime details are marked unavailable instead of inventing a cause',async() => {
+  const setup = await harness();
+  setup.sockets[0].handlers.error();
+  const failure = JSON.parse(setup.logs.find(line => line.startsWith('QQ Gateway 连接错误：')).split('：')[1]);
+  assert.equal(failure.error.available,false);
+  assert.equal(failure.error.details.length,0);
+});
+
+test('late close diagnostics still redact the session after invalid-session recovery clears it',async() => {
+  const setup = await harness();
+  setup.hello(); setup.ready();
+  const socket = setup.sockets[0];
+  socket.packet({op:9,d:false});
+  socket.handlers.close({code:4009,reason:'fake-session fake-token fake-secret'});
+  assert(setup.logs.every(line => !/fake-session|fake-token|fake-secret/.test(line)));
+  await setup.advance(1000);
+  setup.hello();
+  assert.equal(setup.sockets[1].sent[0].op,2);
 });

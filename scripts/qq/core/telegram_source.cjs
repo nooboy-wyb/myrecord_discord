@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {DatabaseSync} = require('node:sqlite');
 const {archivedMessage} = require('../../telegram/send_qq_history.cjs');
+const yekoi = require('../../qq_channels/yekoi/index.cjs');
 
 function readSources(root) {
   const file = path.join(root,'telegram','sources.json');
@@ -29,7 +30,10 @@ function telegramTarget(routes,primary,source) {
   if (targets.length !== 1) return null;
   const target = targets[0];
   return /^[A-Za-z0-9]+$/.test(target.group_openid || '') && target.group_openid !== primary.group_openid
-    && Array.isArray(target.channel_ids) && !target.channel_ids.length
+    && Array.isArray(target.channel_ids)
+    && (!target.channel_ids.length || target.allow_mixed_sources === true
+      && target.channel_ids.every(id => typeof id === 'string' && /^\d{15,22}$/.test(id))
+      && new Set(target.channel_ids).size === target.channel_ids.length)
     && Number.isFinite(Date.parse(target.enabled_at || '')) ? target : null;
 }
 
@@ -45,9 +49,11 @@ function planTelegram(root,enqueue,terminal = () => false) {
   const status = {enabled:sources.length,queued:0,blocked:[]};
   try {
     for (const source of sources) {
+      const channelId = `telegram:${source.peer_id}:${source.topic_id || 'all'}`;
+      if (!yekoi.forwardingEnabled(channelId)) continue;
       const target = telegramTarget(routes,primary,source);
       if (!target) {
-        status.blocked.push({peer_id:source.peer_id,error:'Telegram target is not bound or has Discord routes'});
+        status.blocked.push({peer_id:source.peer_id,error:'Telegram target is invalid, ambiguous or mixed sources are not enabled'});
         continue;
       }
       const rows = archive.prepare(`SELECT * FROM telegram_messages m WHERE peer_id=? AND julianday(source_timestamp)>=julianday(?)
@@ -75,6 +81,7 @@ function planTelegram(root,enqueue,terminal = () => false) {
 }
 
 function telegramAllowed(root,message,context) {
+  if (!yekoi.forwardingEnabled(message.channel_id)) return false;
   const routes = JSON.parse(fs.readFileSync(path.join(root,'qq-additional-routes.json'),'utf8')).routes;
   const primary = JSON.parse(fs.readFileSync(path.join(root,'qq-group-openid.json'),'utf8'));
   return readSources(root).some(source => message.channel_id === `telegram:${source.peer_id}:${source.topic_id || 'all'}`
