@@ -159,6 +159,10 @@ function assess(role,{processes = [],listeners = [],health:probe = {},telegram,q
       && processMatches(item.CommandLine,path.join(root,'telegram')))));
   const matchedIds = new Set(matches.map(item => item.ProcessId));
   const instances = matches.filter(item => !matchedIds.has(item.ParentProcessId));
+  const runtimeNames = role === 'telegram' ? ['python.exe','pythonw.exe'] : ['node.exe'];
+  if (!matches.length && processes.some(item => runtimeNames.includes(String(item.Name || '').toLowerCase())
+      && !String(item.CommandLine || '').trim()))
+    inspection_error ||= 'Runtime process command line unavailable; cannot confirm process identity';
   const launcherNames = {discord:'start_discord_collector.ps1',telegram:'start_telegram.ps1',qq:'start_qq_sender.ps1'};
   const launchers = processes.filter(item =>
     (processMatches(item.CommandLine,path.join(project,'scripts','start_monitored_role.ps1'))

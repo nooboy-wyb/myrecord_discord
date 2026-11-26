@@ -73,6 +73,18 @@ test('no new messages and an idle QQ drain are healthy while scan progress and h
   assert.deepEqual(qq.issues,[],'running=false means an idle planner/drain, not an exited service');
 });
 
+test('unreadable runtime command lines block recovery instead of confirming a process exit',() => {
+  for (const [role,runtime] of [['discord','node.exe'],['telegram','python.exe'],['qq','node.exe']]) {
+    const observation = assess(role,{processes:[{ProcessId:10,Name:runtime,CommandLine:null}],recover:true},now,project);
+    assert(observation.inspection_error);
+    assert(!observation.issues.some(issue => issue.code === 'PROCESS_ABSENT'));
+    const decision = transition({missing_count:5},observation,now);
+    assert.equal(decision.state,'INSPECTION_FAILED');
+    assert.equal(decision.action,'none');
+    assert.equal(decision.missing_count,0);
+  }
+});
+
 test('Python venv launcher and child count as one instance; different data directories and entry suffixes do not match',() => {
   const command = `python "${path.join(project,'scripts','telegram','collector.py')}" monitor --data-dir "${path.join(project,'data','telegram')}"`;
   const processes = [{ProcessId:10,ParentProcessId:1,CommandLine:command},{ProcessId:11,ParentProcessId:10,CommandLine:command}];
@@ -336,7 +348,7 @@ test('status and logs redact credentials, URLs and message payloads',async t => 
 test('actual Windows role launcher preserves warnings and writes exit results in a temporary project',
   {skip:process.platform !== 'win32',timeout:20000},async t => {
     const folder = fs.mkdtempSync(path.join(os.tmpdir(),'muse role launch '));
-    t.after(() => fs.rmSync(folder,{recursive:true,force:true}));
+    t.after(() => fs.promises.rm(folder,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
     fs.mkdirSync(path.join(folder,'scripts'));
     fs.mkdirSync(path.join(folder,'data','monitor'),{recursive:true});
     fs.mkdirSync(path.join(folder,'data','telegram','runtime','Scripts'),{recursive:true});
@@ -364,21 +376,23 @@ test('a recovered Windows role survives the one-shot monitor process exiting',
     let role;
     t.after(async () => {
       if (role) {
-        try {process.kill(role.pid);} catch (error) {if (error.code !== 'ESRCH') throw error;}
-        const deadline = Date.now()+2000;
+        fs.writeFileSync(path.join(folder,'data','release'),'');
+        const deadline = Date.now()+5000;
         while (Date.now() < deadline) {
           try {process.kill(role.pid,0);} catch {break;}
           await new Promise(resolve => setTimeout(resolve,20));
         }
+        try {process.kill(role.pid);} catch (error) {if (error.code !== 'ESRCH') throw error;}
       }
-      fs.rmSync(folder,{recursive:true,force:true,maxRetries:10,retryDelay:50});
+      await fs.promises.rm(folder,{recursive:true,force:true,maxRetries:10,retryDelay:100});
     });
     fs.mkdirSync(path.join(folder,'scripts'));
     fs.mkdirSync(path.join(folder,'data','monitor'),{recursive:true});
     fs.mkdirSync(path.join(folder,'data','telegram','runtime','Scripts'),{recursive:true});
     fs.writeFileSync(path.join(folder,'data','telegram','runtime','Scripts','python.exe'),'unused runtime marker');
     fs.copyFileSync(path.join(project,'scripts','start_monitored_role.ps1'),path.join(folder,'scripts','start_monitored_role.ps1'));
-    fs.writeFileSync(path.join(folder,'scripts','start_telegram.ps1'),"param([string]$Action)\nStart-Sleep -Seconds 30\n");
+    fs.writeFileSync(path.join(folder,'scripts','start_telegram.ps1'),
+      "param([string]$Action)\n$deadline=[DateTime]::UtcNow.AddSeconds(30)\nwhile (-not (Test-Path -LiteralPath (Join-Path $env:MUSE_DATA_DIR 'release')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }\n");
     const resultFile = path.join(folder,'launch.json');
     const code = `require(${JSON.stringify(path.join(project,'scripts','service_monitor.cjs'))}).launch('telegram',${JSON.stringify(folder)},${JSON.stringify(path.join(folder,'data'))},${now})`
       +`.then(result => require('node:fs').writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(result)))`

@@ -1,6 +1,30 @@
-# DC / TG / QQ 有限状态巡检（本地验证版）
+# DC / TG / QQ 有限状态巡检
 
-2026-11-26 在本地实现并测试。本次仅通过 SSH 读取远端异常，没有部署代码、安装任务、启动或停止远端进程。此前的 `collector-watchdog-plan.md` 是交接方案，本文记录本地实现。
+2026-11-26 完成本地验证后，按用户后续授权部署到远端。此前的 `collector-watchdog-plan.md` 是初期交接方案；下文的本地验证记录描述部署前阶段，当前部署情况以本节为准。
+
+## 远端部署（2026-11-26，北京时间）
+
+- 项目：`C:\Users\MECHREVO\Documents\muse`；Node：`D:\node\node.exe`，版本 24.14.0，已验证 `node:sqlite` 可用。
+- Windows 任务：`Muse-Service-Monitor-muse`，每分钟运行 `scripts/check_services.ps1 -NodePath D:\node\node.exe -Recover`，忽略重叠触发。以既有业务用户 MECHREVO 的 Interactive / Highest 身份运行；用户注销后不能保证继续执行，尚未验证机器重启后的运行情况。
+- 初次普通权限任务无法读取已有高权限业务进程的命令行，曾报告身份冲突；立即停用该任务后改为 Highest，并增加命令行不可读时的 INSPECTION_FAILED 保护。此时禁止恢复，不把权限不足解释为进程退出。
+- 部署源文件共 11 个；DC 页面/入库错误、TG 扫描进度和异常字段随业务代码一起上线。TG 启动器警告修复此前已在远端，本次核对其哈希一致，无需再次覆盖。QQ 启动器、发送代码和进程保持原样。
+- 为加载新增字段，逐角色暂停巡检恢复、核对旧进程身份、结束旧实例，再由状态机连续确认缺失并拉起 DC 和 TG；各消耗一次原有恢复预算，不清零。新业务进程独立于一次性巡检及 SSH 会话存活。
+- 17:08 检查：DC 8/8 页面扫描正常；TG 三个来源扫描正常；QQ 在线、Gateway ACK 和规划时间持续更新，DEGRADED 仅因保留的 15 条历史 unknown 发送部分，仍隔离且未自动重发。DC、TG 各一个实例；TG 虚拟环境启动器和 Python 子进程属于同一实例。
+- 修正后 17:08:33 手动触发、17:09:32 自动触发的巡检均成功退出，任务结果为 0；页面、TG 扫描和 Gateway ACK 时间继续推进，角色 PID 和恢复次数保持稳定。外层 SUCCEEDED 与业务 DEGRADED 分开记录。
+- 部署前在远端隔离目录运行 32 项 Node 验证，全部通过；包括实际 Windows 独立启动、原生警告/退出码、巡检超时、并发和预算保留。测试子进程与业务数据分开，未通过终止 QQ 验证恢复。
+- 备份与哈希清单：`data/maintenance/monitor-9f58405-20261126/backup/before.json`、`deployed-manifest.json`；三个被替换的旧业务源文件按原目录保存在 backup 下。任务 XML、隔离测试日志也保存在该维护目录；后续权限修正前的两个巡检文件另有副本。
+- `data/monitor/status.json`、`supervisor-status.json` 和按日事件日志已开始持续落盘。故障交接包只在本机生成；未安装模型上传任务，未调用 Codex LLM。原 QQ 私聊告警继续由原业务代码处理；独立巡检尚未接入私聊转发。
+
+手动检查和暂停恢复（在远端项目目录、同一用户及相同权限下执行）：
+
+```powershell
+.\scripts\recover_services.ps1 -Action Status -NodePath D:\node\node.exe
+.\scripts\recover_services.ps1 -Action Pause -Role all -NodePath D:\node\node.exe
+.\scripts\recover_services.ps1 -Action Resume -Role all -NodePath D:\node\node.exe
+Get-ScheduledTaskInfo -TaskName Muse-Service-Monitor-muse
+```
+
+暂停仅禁止自动拉起，不停止业务。维护时应先暂停对应角色；禁用任务可用 `Disable-ScheduledTask -TaskName Muse-Service-Monitor-muse`。不要删除 state.json 重置预算；需要回滚源码时先停用任务，并按备份清单恢复相应文件。
 
 ## 读取到的远端异常
 
@@ -72,7 +96,7 @@ node --test test/service_monitor.cjs test/collector_page_status.cjs test/telegra
 
 恢复现在通过本机 `Win32_Process.Create` 创建隐藏的独立 PowerShell 包装器，显式设置项目目录、数据目录、Node 路径和退出记录路径。已在临时项目验证：一次性巡检 Node 进程退出后，包装器仍存活；启动器命令仍可识别，慢启动期间不会被误判为缺失。stdout/stderr 记录为 UTF-8，原生退出码 0 / 7 和警告保留测试通过。启动成功仍以随后业务进程和健康信号为准。创建权限或 Windows 管理服务不可用时记 START_FAILED，继续服从原恢复预算。
 
-`check_services.ps1` 是手动巡检入口，默认只观察；`-Recover` 才启动恢复。`install_service_monitor.ps1` 为后续部署准备了一分钟周期的 Windows 任务定义，本次没有执行。未来安装必须以业务凭据所属 Windows 用户执行，默认项目数据目录，交互登录会话；本地测试不能证明远端任务调度、用户注销或机器重启后的行为。
+`check_services.ps1` 是手动巡检入口，默认只观察；`-Recover` 才启动恢复。`install_service_monitor.ps1` 定义一分钟周期的 Windows 任务，以业务凭据所属 Windows 用户、Highest 权限、默认项目数据目录、交互登录会话运行。部署前本地阶段没有安装；远端当前状态见本文部署记录。进程列表有同类运行时但命令行不可读时，不能确认角色缺失，记录 INSPECTION_FAILED 并禁止启动。
 
 ## 巡检脚本本身的保护
 
