@@ -6,7 +6,7 @@ const os = require('node:os');
 const {DatabaseSync} = require('node:sqlite');
 const {spawn} = require('node:child_process');
 const {once} = require('node:events');
-const {policy,transition,assess,processMatches,gatewayStatus,classifyError,scrub,run,launch,incidents} = require('../scripts/service_monitor.cjs');
+const {policy,transition,assess,processMatches,gatewayStatus,classifyError,scrub,run,launch,incidents,control,parseArguments} = require('../scripts/service_monitor.cjs');
 const now = Date.parse('2026-11-26T07:00:00Z');
 const iso = new Date(now).toISOString();
 const project = path.resolve(__dirname,'..');
@@ -193,6 +193,52 @@ test('queue isolation remains visible when the QQ health endpoint is down',() =>
   const qq = assess('qq',{health:{present:false,error:'ECONNREFUSED'},queue:{groups:[],unknown_parts:1}},now,project);
   assert(qq.issues.some(item => item.code === 'SEND_UNKNOWN'));
   assert(qq.issues.some(item => item.code === 'HEALTH_UNAVAILABLE'));
+});
+
+test('role selection restricts recovery while all three roles continue to be inspected',async t => {
+  const context = fixture(t);
+  context.alive.clear();
+  context.options.probe = async () => ({present:false,error:'ECONNREFUSED'});
+  await run({...context.options,recoverRoles:['telegram']});
+  const result = await run({...context.options,recoverRoles:['telegram'],now:now+60000});
+  assert.deepEqual(context.starts,['telegram']);
+  assert.equal(result.roles.discord.state,'STOPPED');
+  assert.equal(result.roles.qq.state,'STOPPED');
+  assert.deepEqual(result.recovery_roles,['telegram']);
+  assert.deepEqual(parseArguments(['--recover','--role','telegram']).recoverRoles,['telegram']);
+  for (const args of [['--role','typo'],['--unexpected'],['--recover','--control','pause'],['--role']])
+    assert.throws(() => parseArguments(args));
+  await assert.rejects(run({...context.options,recoverRoles:['typo']}),/Invalid recovery role/);
+});
+
+test('pause and resume controls preserve budgets, respect global pause and retain individual pause markers',async t => {
+  const context = fixture(t);
+  await run(context.options);
+  await run({...context.options,now:now+60000});
+  const budget = fs.readFileSync(path.join(context.root,'monitor','state.json'));
+  control({root:context.root,action:'pause',role:'all'});
+  control({root:context.root,action:'pause',role:'telegram'});
+  const result = control({root:context.root,action:'resume',role:'all'});
+  assert.equal(result.paused_all,false);
+  assert.deepEqual(result.paused_roles,['telegram']);
+  control({root:context.root,action:'pause',role:'all'});
+  assert.equal(control({root:context.root,action:'resume',role:'telegram'}).paused_all,true);
+  assert.deepEqual(fs.readFileSync(path.join(context.root,'monitor','state.json')),budget);
+  assert.equal((await run({...context.options,now:now+400000})).roles.telegram.state,'PAUSED');
+  assert.deepEqual(context.starts,['telegram']);
+});
+
+test('handoff failures remain visible without erasing or retrying an already committed launch',async t => {
+  const context = fixture(t);
+  await run(context.options);
+  fs.writeFileSync(path.join(context.root,'monitor','handoff','telegram.json'),'{bad');
+  const report = await run({...context.options,now:now+60000});
+  assert.equal(report.handoff_error,'HANDOFF_WRITE_FAILED');
+  assert.deepEqual(report.roles.telegram.restarts,[now+60000]);
+  await run({...context.options,now:now+90000});
+  assert.deepEqual(context.starts,['telegram']);
+  const state = JSON.parse(fs.readFileSync(path.join(context.root,'monitor','state.json'),'utf8'));
+  assert.deepEqual(state.roles.telegram.restarts,[now+60000]);
 });
 
 test('long Telegram catch-up and persistent network failures remain observable without restarting a live process',async t => {

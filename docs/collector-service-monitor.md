@@ -73,3 +73,57 @@ node --test test/service_monitor.cjs test/collector_page_status.cjs test/telegra
 Windows 实测发现 Node `detached:true` 启动隐藏 PowerShell 时可能退出但不执行脚本，因此实际恢复用隐藏的 `Start-Process` 创建包装器。本地临时项目已验证警告保留和原生退出码 0 / 7 落盘，不以仅拿到 PID 作为恢复完成。
 
 `check_services.ps1` 是手动巡检入口，默认只观察；`-Recover` 才启动恢复。`install_service_monitor.ps1` 为后续部署准备了一分钟周期的 Windows 任务定义，本次没有执行。未来安装必须以业务凭据所属 Windows 用户执行，默认项目数据目录，交互登录会话；本地测试不能证明远端任务调度、用户注销或机器重启后的行为。
+
+## 按角色恢复入口
+
+`scripts/recover_services.ps1` 提供 Status / Recover / Pause / Resume 四种动作，默认 Status，只记录观察结果。Role 可选 all / discord / telegram / qq。所有动作针对运行脚本的本机和 `MUSE_DATA_DIR`，不含 SSH、远端部署或远端进程控制。
+
+```powershell
+.\scripts\recover_services.ps1 -Action Status
+.\scripts\recover_services.ps1 -Action Recover -Role telegram
+.\scripts\recover_services.ps1 -Action Pause -Role telegram
+.\scripts\recover_services.ps1 -Action Resume -Role telegram
+```
+
+Recover 仍检查全部三个角色，但只允许指定角色进入原有的限次启动分支。它不提供强制重启、杀进程或预算清零功能。连续两次确认缺失、启动宽限、冷却、滚动预算、授权/权限阻断和端口归属检查继续生效；重复手工调用也不能绕过。
+
+Pause 只暂停巡检恢复，不停止业务进程。Resume 只删除选中的暂停标记，不立即启动。Resume all 只移除全局暂停，保留各角色的单独暂停；Resume telegram 遇到全局暂停时仍不能恢复。暂停操作写入统一事件日志，不修改重启预算。手工维护业务前，应先暂停对应角色。
+
+## 告警交给 Codex 诊断
+
+本地链路为：巡检状态和异常 → 脱敏告警包 → 可选 Codex 诊断 → 校验后的建议文件。自动恢复由原状态机执行，诊断结果只落盘，不执行模型返回的命令。
+
+- `data/monitor/handoff/<role>.json` 保存各角色最近一轮故障。每轮有稳定 ID 和修订号，重复观察不会新建故障；状态、错误类别、恢复次数或退出结果变化才增加修订号。恢复后标记 RESOLVED，人工暂停标记 SUSPENDED，再次异常创建新 ID。
+- 告警包通过字段白名单构造，只包含角色、状态、固定异常代码/类别、发生时间、计数、恢复次数和退出码。不包含原始异常文本、消息正文、来源 ID、完整日志、命令行、项目路径或凭据。具体错误仍留在本机状态和事件日志，需要更多证据时由人工补充。
+- `unknown` 的处理规则始终为 `quarantine_no_retry`；允许建议只有 observe / manual_review / recover_via_fsm。运行中的业务错误不会向模型开放恢复建议。recover_via_fsm 也只代表重新走巡检规则，不代表无条件启动。
+- 告警包生成失败会保留已落盘的启动预算、在状态中标记 HANDOFF_WRITE_FAILED，并使命令失败退出，避免把恢复成功与告警写入成功混为一谈。
+
+先仅生成诊断材料，不联机、不调用模型：
+
+```powershell
+.\scripts\diagnose_monitor_alert.ps1 -Role telegram
+```
+
+输出目录为 `data/monitor/codex/<故障ID>-r<修订号>/`，内含 request.json、prompt.txt 和 response.schema.json。同一修订号复用同一目录。已解除或暂停的告警拒绝提交。
+
+后续需要实际交给本机已登录的 Codex CLI 时，显式增加 Submit：
+
+```powershell
+.\scripts\diagnose_monitor_alert.ps1 -Role telegram -Submit
+```
+
+Submit 会使用本机 `codex exec`，从 stdin 传入脱敏包，以 `--ignore-user-config --ephemeral --sandbox read-only --skip-git-repo-check` 运行，并用 `--output-schema` 约束回执。诊断工作目录是项目之外的独立临时目录，只放提示词和结构定义；提示词要求只分析输入，不调用工具或接触服务。未更改用户的 Codex 配置。当前参数已按本机 Codex CLI 0.166.0 的 `codex exec --help` 核对，真实账号、联网调用、模型兼容性尚未联调。它不向当前桌面聊天自动插入消息。
+
+默认 300 秒超时，TimeoutSeconds 可设 10–900 秒；超时时结束本次创建的本地诊断进程树。同一任务使用独占提交锁，已有有效回执就不重复提交。成功后校验故障 ID、修订号、角色、允许动作、证据代码和字段结构，再写入 response.json；额外的 command 字段、未知发送重试动作等会被拒绝。回执到达时重新比较当前故障；已变化、解除或暂停则标记 current=false。无论 current 值如何，当前脚本都不会应用模型建议。
+
+未来可以增加“异常持续或自动恢复耗尽后触发 Submit”的本地适配器，以及审核后调用 Recover 的执行入口；仍须重新读取最新状态并检查原有预算。当前未安装定时上传或模型自动修复功能。原 QQ 私聊告警仍由原 QQ 代码处理，独立巡检尚未接入私聊通知，也未发送测试私聊。
+
+新增验证：
+
+```powershell
+node --test test/service_monitor.cjs test/monitor_diagnosis.cjs
+```
+
+使用临时数据和模拟 Codex 命令验证角色选择、暂停层级、预算保留、告警脱敏/去重/解除、回执拒绝、过期标记、默认不提交、同一修订只提交一次，以及非零退出与超时处理。模拟提交实际经过 Windows PowerShell 包装器，不消耗模型调用，也不读取远端。
+
+2026-11-26 本轮相关 Node 测试 37 项通过，无跳过，包含三个业务进程的本地联测；新增 PowerShell 脚本语法检查通过。未执行真实模型调用、远端恢复或定时任务安装。

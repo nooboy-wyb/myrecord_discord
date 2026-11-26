@@ -5,6 +5,7 @@ const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const {DatabaseSync} = require('node:sqlite');
 const {acquireLock} = require('./qq/core/process_lock.cjs');
+const {writeHandoffs} = require('./monitor_handoff.cjs');
 
 const policy = {window_ms:3600000,max_restarts:3,cooldown_ms:300000,startup_ms:120000,missing_checks:2,stale_ms:300000,backlog_ms:900000};
 const roles = ['discord','telegram','qq'];
@@ -266,7 +267,9 @@ function incidents(previous,observations,at,append) {
   return active;
 }
 async function run({project = path.resolve(__dirname,'..'),root = path.resolve(process.env.MUSE_DATA_DIR || path.join(project,'data')),
-  recover = false,inspect = inspectProcesses,probe = health,start = launch,now = Date.now()} = {}) {
+  recover = false,recoverRoles = roles,inspect = inspectProcesses,probe = health,start = launch,now = Date.now()} = {}) {
+  if (!Array.isArray(recoverRoles) || !recoverRoles.length || recoverRoles.some(role => !roles.includes(role)))
+    throw Error('Invalid recovery role');
   const folder = path.join(root,'monitor');
   fs.mkdirSync(folder,{recursive:true});
   const release = acquireLock(path.join(folder,'monitor.lock'));
@@ -307,7 +310,7 @@ async function run({project = path.resolve(__dirname,'..'),root = path.resolve(p
     for (const role of roles) {
       const paused = fs.existsSync(path.join(folder,'pause-all')) || fs.existsSync(path.join(folder,`pause-${role}`));
       const observation = assess(role,{...inventory,health:role === 'discord' ? discord : role === 'qq' ? qq : {},
-        telegram,queue,gateway,inspection_error:inspection_error || token_error,paused,recover},now,project,root);
+        telegram,queue,gateway,inspection_error:inspection_error || token_error,paused,recover:recover && recoverRoles.includes(role)},now,project,root);
       const decision = transition(previous.roles[role],observation,now);
       decision.last_launch = previous.roles[role]?.last_launch ?? null;
       if (decision.last_launch?.exit_file && fs.existsSync(decision.last_launch.exit_file)) {
@@ -342,12 +345,55 @@ async function run({project = path.resolve(__dirname,'..'),root = path.resolve(p
     }
     const active = incidents(previous.incidents,observations,at,append);
     atomicJson(stateFile,scrub({at,roles:next,incidents:active,queue_since},[token]));
-    const report = scrub({at,recovery_enabled:recover,policy,inspection_error:inspection_error || token_error || null,roles:observations},[token]);
+    const report = scrub({at,recovery_enabled:recover,recovery_roles:recover ? recoverRoles : [],policy,
+      inspection_error:inspection_error || token_error || null,roles:observations},[token]);
+    try {report.handoffs = writeHandoffs(folder,report,active,append);}
+    catch (error) {
+      report.handoff_error = 'HANDOFF_WRITE_FAILED';
+      append({event:'handoff_failed',error:safeText(error.message)});
+    }
     atomicJson(path.join(folder,'status.json'),report);
     return report;
   } finally {release();}
 }
-if (require.main === module) run({recover:process.argv.includes('--recover')}).then(report => {
-  console.log(JSON.stringify({at:report.at,states:Object.fromEntries(roles.map(role => [role,report.roles[role].state]))}));
-}).catch(error => {console.error(`Monitor failed: ${safeText(error.message)}`);process.exitCode = 1;});
-module.exports = {policy,transition,processMatches,gatewayStatus,assess,incidents,run,launch,safeText,scrub,classifyError};
+function control({action,role = 'all',root = path.resolve(process.env.MUSE_DATA_DIR || path.join(__dirname,'..','data'))}) {
+  if (!['pause','resume'].includes(action) || !['all',...roles].includes(role)) throw Error('Invalid monitor control');
+  const folder = path.join(root,'monitor');
+  fs.mkdirSync(folder,{recursive:true});
+  const release = acquireLock(path.join(folder,'monitor.lock'));
+  try {
+    const file = path.join(folder,`pause-${role}`);
+    if (action === 'pause') fs.writeFileSync(file,new Date().toISOString(),'utf8');
+    else fs.rmSync(file,{force:true});
+    const now = new Date();
+    const day = new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(now);
+    fs.appendFileSync(path.join(folder,`events-${day}.jsonl`),JSON.stringify({event:'manual_control',action,role,observed_at:now.toISOString()})+'\n');
+    return {action,role,paused_all:fs.existsSync(path.join(folder,'pause-all')),
+      paused_roles:roles.filter(item => fs.existsSync(path.join(folder,`pause-${item}`)))};
+  } finally {release();}
+}
+function parseArguments(args) {
+  const options = {recover:false,recoverRoles:roles};
+  let selected = 'all';
+  for (let index = 0;index < args.length;index++) {
+    if (args[index] === '--recover') options.recover = true;
+    else if (args[index] === '--role' && args[index+1]) selected = args[++index].toLowerCase();
+    else if (args[index] === '--control' && args[index+1]) options.control = args[++index].toLowerCase();
+    else throw Error('Invalid monitor argument');
+  }
+  if (!['all',...roles].includes(selected)) throw Error('Invalid recovery role');
+  if (options.control && (!['pause','resume'].includes(options.control) || options.recover)) throw Error('Invalid monitor control');
+  return {...options,role:selected,recoverRoles:selected === 'all' ? roles : [selected]};
+}
+async function main(args) {
+  const options = parseArguments(args);
+  if (options.control) return console.log(JSON.stringify(control({action:options.control,role:options.role})));
+  const report = await run(options);
+  console.log(JSON.stringify({at:report.at,states:Object.fromEntries(roles.map(role => [role,report.roles[role].state])),
+    handoff_error:report.handoff_error || null}));
+  if (report.handoff_error) process.exitCode = 1;
+}
+if (require.main === module) main(process.argv.slice(2)).catch(error => {
+  console.error(`Monitor failed: ${safeText(error.message)}`);process.exitCode = 1;
+});
+module.exports = {policy,transition,processMatches,gatewayStatus,assess,incidents,run,launch,safeText,scrub,classifyError,control,parseArguments};
