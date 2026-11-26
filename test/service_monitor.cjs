@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const {DatabaseSync} = require('node:sqlite');
-const {spawn} = require('node:child_process');
+const {spawn,execFile} = require('node:child_process');
+const {promisify} = require('node:util');
 const {once} = require('node:events');
 const {policy,transition,assess,processMatches,gatewayStatus,classifyError,scrub,run,launch,incidents,control,parseArguments} = require('../scripts/service_monitor.cjs');
 const now = Date.parse('2026-11-26T07:00:00Z');
@@ -355,4 +356,43 @@ test('actual Windows role launcher preserves warnings and writes exit results in
       assert.equal(result.exit_code,exitCode);
       assert.match(stderr,/WARNING: fixture disconnect/);
     }
+  });
+
+test('a recovered Windows role survives the one-shot monitor process exiting',
+  {skip:process.platform !== 'win32',timeout:15000},async t => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(),'muse independent role '));
+    let role;
+    t.after(async () => {
+      if (role) {
+        try {process.kill(role.pid);} catch (error) {if (error.code !== 'ESRCH') throw error;}
+        const deadline = Date.now()+2000;
+        while (Date.now() < deadline) {
+          try {process.kill(role.pid,0);} catch {break;}
+          await new Promise(resolve => setTimeout(resolve,20));
+        }
+      }
+      fs.rmSync(folder,{recursive:true,force:true,maxRetries:10,retryDelay:50});
+    });
+    fs.mkdirSync(path.join(folder,'scripts'));
+    fs.mkdirSync(path.join(folder,'data','monitor'),{recursive:true});
+    fs.mkdirSync(path.join(folder,'data','telegram','runtime','Scripts'),{recursive:true});
+    fs.writeFileSync(path.join(folder,'data','telegram','runtime','Scripts','python.exe'),'unused runtime marker');
+    fs.copyFileSync(path.join(project,'scripts','start_monitored_role.ps1'),path.join(folder,'scripts','start_monitored_role.ps1'));
+    fs.writeFileSync(path.join(folder,'scripts','start_telegram.ps1'),"param([string]$Action)\nStart-Sleep -Seconds 30\n");
+    const resultFile = path.join(folder,'launch.json');
+    const code = `require(${JSON.stringify(path.join(project,'scripts','service_monitor.cjs'))}).launch('telegram',${JSON.stringify(folder)},${JSON.stringify(path.join(folder,'data'))},${now})`
+      +`.then(result => require('node:fs').writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(result)))`
+      +'.catch(error => {console.error(error.message);process.exitCode=1;});';
+    const worker = spawn(process.execPath,['-e',code],{windowsHide:true,stdio:'ignore'});
+    assert.equal((await once(worker,'close'))[0],0);
+    role = JSON.parse(fs.readFileSync(resultFile,'utf8'));
+    await new Promise(resolve => setTimeout(resolve,300));
+    process.kill(role.pid,0);
+    assert(!fs.existsSync(role.exit_file),'fixture role exited with its monitor parent');
+    const script = `(Get-CimInstance Win32_Process -Filter 'ProcessId=${role.pid}').CommandLine | ConvertTo-Json -Compress`;
+    const {stdout} = await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+      {windowsHide:true,timeout:5000});
+    const launching = assess('telegram',{processes:[{ProcessId:role.pid,CommandLine:JSON.parse(stdout)}]},now,folder);
+    assert.equal(launching.starting,true,'independent wrapper must remain recognizable during slow startup');
+    assert.equal(transition({missing_count:5},{...launching,recover:true},now).action,'none');
   });

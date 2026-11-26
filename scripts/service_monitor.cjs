@@ -236,14 +236,17 @@ async function launch(role,project,root,now) {
   if (role === 'telegram' && !fs.existsSync(path.join(root,'telegram','runtime','Scripts','python.exe'))) throw Error('Telegram runtime missing');
   const log = path.join(root,'monitor',`${role}-${now}`);
   const quote = value => "'"+value.replaceAll("'","''")+"'";
-  const launchArguments = `-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${path.join(project,'scripts','start_monitored_role.ps1')}" -Role ${role}`;
-  const script = `$ErrorActionPreference='Stop';
-    $child=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList ${quote(launchArguments)}
-      -WorkingDirectory ${quote(project)} -WindowStyle Hidden -RedirectStandardOutput ${quote(`${log}.stdout.log`)}
-      -RedirectStandardError ${quote(`${log}.stderr.log`)} -PassThru;
-    Write-Output $child.Id`;
-  const {stdout} = await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script.replace(/\n\s+-/g,' -'),'utf16le').toString('base64')],
-    {cwd:project,env:{...process.env,MUSE_DATA_DIR:root,MUSE_NODE_PATH:process.execPath,MUSE_MONITOR_LAUNCH_RESULT:`${log}.exit.json`},
+  const childScript = `$ErrorActionPreference='Continue';$ProgressPreference='SilentlyContinue';$PSDefaultParameterValues=@{'Out-File:Encoding'='utf8'};
+    $env:MUSE_DATA_DIR=${quote(root)};$env:MUSE_NODE_PATH=${quote(process.execPath)};$env:MUSE_MONITOR_LAUNCH_RESULT=${quote(`${log}.exit.json`)};
+    & ${quote(path.join(project,'scripts','start_monitored_role.ps1'))} -Role ${role} 1>${quote(`${log}.stdout.log`)} 2>${quote(`${log}.stderr.log`)};
+    exit $LASTEXITCODE`;
+  const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
+    $command='"'+(Join-Path $PSHOME 'powershell.exe')+'" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command '+${quote('"'+childScript+'"')};
+    $created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$command;CurrentDirectory=${quote(project)}};
+    if ($created.ReturnValue -ne 0) {throw ('Independent role launch failed, Windows code '+$created.ReturnValue)};
+    Write-Output $created.ProcessId`;
+  const {stdout} = await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+    {cwd:project,env:process.env,
       windowsHide:true,timeout:15000,maxBuffer:131072});
   const pid = Number(stdout.trim());
   if (!Number.isSafeInteger(pid) || pid < 1) throw Error('Role launcher returned an invalid PID');

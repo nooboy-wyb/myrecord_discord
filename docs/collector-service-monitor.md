@@ -70,9 +70,26 @@ node --test test/service_monitor.cjs test/collector_page_status.cjs test/telegra
 
 测试使用临时目录、模拟健康接口和时钟；实际子进程验证也只启动临时项目中的模拟角色。覆盖逐角色退出只启动对应角色、连续缺失确认、冷却、上限、预算持久化、授权失败、暂停、并发锁、进程身份、Python 父子链、空扫描、长补采、业务异常、日志脱敏及 `unknown` 数据不变。2026-11-26 验证：相关 Node 测试 26 项、Telegram Python 测试 28 项通过，无跳过；PowerShell 脚本语法检查通过。
 
-Windows 实测发现 Node `detached:true` 启动隐藏 PowerShell 时可能退出但不执行脚本，因此实际恢复用隐藏的 `Start-Process` 创建包装器。本地临时项目已验证警告保留和原生退出码 0 / 7 落盘，不以仅拿到 PID 作为恢复完成。
+恢复现在通过本机 `Win32_Process.Create` 创建隐藏的独立 PowerShell 包装器，显式设置项目目录、数据目录、Node 路径和退出记录路径。已在临时项目验证：一次性巡检 Node 进程退出后，包装器仍存活；启动器命令仍可识别，慢启动期间不会被误判为缺失。stdout/stderr 记录为 UTF-8，原生退出码 0 / 7 和警告保留测试通过。启动成功仍以随后业务进程和健康信号为准。创建权限或 Windows 管理服务不可用时记 START_FAILED，继续服从原恢复预算。
 
 `check_services.ps1` 是手动巡检入口，默认只观察；`-Recover` 才启动恢复。`install_service_monitor.ps1` 为后续部署准备了一分钟周期的 Windows 任务定义，本次没有执行。未来安装必须以业务凭据所属 Windows 用户执行，默认项目数据目录，交互登录会话；本地测试不能证明远端任务调度、用户注销或机器重启后的行为。
+
+## 巡检脚本本身的保护
+
+`check_services.ps1` 现在作为外层执行器启动单轮 Node 巡检，默认最多等待 90 秒。巡检异常退出保留原退出码；超时只结束本轮 Node 进程，返回 124，并记录 TIMED_OUT。不存在本轮内部无限重试；后续任务触发时重新运行。业务包装器独立启动，已有业务进程不在超时终止范围内。Status / Recover 手动入口也经过同一层保护，Pause / Resume 仍只操作暂停标记。
+
+- `data/monitor/supervisor-status.json`：本轮开始/结束、巡检 PID、执行结果、实际退出码、连续失败次数、最近成功时间和 stdout/stderr 路径。
+- `data/monitor/supervisor-events-YYYY-MM-DD.jsonl`：按北京时间记录每轮执行结果；每轮日志使用独立文件。
+- `data/monitor/supervisor.lock`：Windows 文件独占锁，重叠调用直接跳过且不覆盖正在执行的状态；进程退出后由操作系统释放锁，不依赖删除旧文件。
+
+外层 SUCCEEDED 仅表示巡检正常完成，不代表三个业务进程均健康；业务结论仍查看 `status.json` 的各角色状态。外层不会删除或重置 `state.json`。已验证：Node 在“预算已落盘、启动尚未返回”时被超时结束，下一轮能回收其失效进程锁，保留已消耗次数并进入冷却，不会立即重复启动。
+
+```powershell
+.\scripts\check_services.ps1 -Recover -TimeoutSeconds 90
+node --test test/service_monitor.cjs test/service_monitor_supervisor.cjs
+```
+
+本轮本地验证覆盖非零退出与警告、超时且已有业务进程继续运行、重叠调用、超时后的下一轮恢复、预算保留、手动入口转发，以及恢复包装器脱离一次性巡检后继续存活。Windows 任务计划尚未安装；这些测试不等于已验证远端常驻运行。
 
 ## 按角色恢复入口
 
