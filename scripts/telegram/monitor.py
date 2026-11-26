@@ -10,6 +10,12 @@ from archive import Archive, utc_now
 from history import parse_until, verify_message, write_json_atomic
 
 
+def failure_detail(failure):
+    message = re.sub(r"(?:https?|socks\d?)://\S+", "[url]", str(failure))
+    message = re.sub(r"(?i)(token|secret|password|api_hash|auth_key)([\s:=]+)\S+", r"\1\2[redacted]", message)
+    return {"error": type(failure).__name__, "error_message": message[:500], "error_at": utc_now()}
+
+
 def read_sources(file):
     configuration = json.loads(file.read_text(encoding="utf-8"))
     if not isinstance(configuration.get("sources"), list):
@@ -67,7 +73,8 @@ async def validate_topic(client, entity, source):
 async def monitor_round(client, folder, sources, save_message, normalize, resolve_channel,
                         topic_validator=validate_topic, until=None):
     until = until or datetime.now(timezone.utc)
-    status = {"role": "telegram-collector", "at": utc_now(), "sources": [], "qq_forwarding": False}
+    status = {"role": "telegram-collector", "at": utc_now(), "phase": "scanning",
+              "round_started_at": utc_now(), "sources": [], "qq_forwarding": False}
     archive = Archive(folder)
     archive.connection.execute("""CREATE TABLE IF NOT EXISTS telegram_monitor_state (
         source_key TEXT PRIMARY KEY, scan_until TEXT NOT NULL, updated_at TEXT NOT NULL)""")
@@ -76,6 +83,11 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
             key = f"{source['peer_id']}:{source.get('topic_id') or 'all'}:{source['enabled_at']}"
             detail = {"peer_id": source["peer_id"], "topic_id": source.get("topic_id"), "read": 0,
                       "inserted": 0, "verified": 0, "scan_complete_to_boundary": False}
+            detail.update(status="scanning", started_at=utc_now(), last_progress_at=utc_now())
+            status["sources"].append(detail)
+            status["at"] = utc_now()
+            write_json_atomic(folder / "monitor-status.json", status)
+            last_progress = time.monotonic()
             try:
                 enabled = parse_until(source["enabled_at"])
                 cursor = archive.connection.execute("SELECT scan_until FROM telegram_monitor_state WHERE source_key=?", (key,)).fetchone()
@@ -101,18 +113,25 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
                     if verify_message(archive, expected)[2]:
                         raise RuntimeError("Archive or image verification failed; checkpoint retained")
                     detail["verified"] += 1
+                    if time.monotonic() - last_progress >= 10:
+                        status["at"] = utc_now()
+                        detail["last_progress_at"] = status["at"]
+                        write_json_atomic(folder / "monitor-status.json", status)
+                        last_progress = time.monotonic()
                 with archive.connection:
                     archive.connection.execute("""INSERT INTO telegram_monitor_state VALUES (?,?,?)
                         ON CONFLICT(source_key) DO UPDATE SET scan_until=excluded.scan_until,updated_at=excluded.updated_at""",
                                                (key, until.isoformat(), utc_now()))
                 detail.update(status="ok", scan_until=until.isoformat(), scan_complete_to_boundary=True)
             except Exception as failure:
-                detail.update(status="error", error=type(failure).__name__)
-            status["sources"].append(detail)
+                detail.update(status="error", **failure_detail(failure))
+            detail["finished_at"] = utc_now()
+            status["at"] = utc_now()
             write_json_atomic(folder / "monitor-status.json", status)
     finally:
         archive.close()
     status["at"] = utc_now()
+    status.update(phase="idle", round_finished_at=status["at"])
     write_json_atomic(folder / "monitor-status.json", status)
     return status
 
@@ -130,7 +149,7 @@ async def monitor(client, folder, args, save_message, normalize, resolve_channel
                     raise PermissionError("Telegram session is unauthorized")
                 status = await monitor_round(client, folder, sources, save_message, normalize, resolve_channel)
             except Exception as failure:
-                status = {"role": "telegram-collector", "at": utc_now(), "error": type(failure).__name__}
+                status = {"role": "telegram-collector", "at": utc_now(), **failure_detail(failure)}
                 write_json_atomic(folder / "monitor-status.json", status)
             print(json.dumps(status, ensure_ascii=False), flush=True)
             if deadline is not None and time.monotonic() >= deadline:

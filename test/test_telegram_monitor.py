@@ -106,6 +106,10 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.round({})["sources"][0]["read"], 0)
         status = json.loads((self.folder/"monitor-status.json").read_text())
         self.assertEqual(status["sources"][0]["scan_until"], self.until.isoformat())
+        self.assertEqual(status["phase"], "idle")
+        self.assertIn("round_started_at", status)
+        self.assertIn("round_finished_at", status)
+        self.assertIn("finished_at", status["sources"][0])
         file = self.folder/"sources.json"
         file.write_text(json.dumps({"sources": [self.source]}))
         self.assertEqual(len(read_sources(file)), 1)
@@ -176,6 +180,26 @@ class MonitorTests(unittest.TestCase):
                                 self.save, self.normalize, None))
         self.assertEqual(client.attempts, 2)
         self.assertEqual(json.loads((self.folder/"monitor-status.json").read_text())["sources"], [])
+
+    def test_source_errors_preserve_time_and_sanitized_description(self):
+        result = self.round({"-1001": [ConnectionError("proxy http://user:password@proxy.invalid:80 token=private disconnected")]})
+        detail = result["sources"][0]
+        self.assertEqual(detail["error"], "ConnectionError")
+        self.assertIn("error_at", detail)
+        self.assertIn("disconnected", detail["error_message"])
+        self.assertNotIn("proxy.invalid", detail["error_message"])
+        self.assertNotIn("private", detail["error_message"])
+
+    def test_scan_start_is_visible_before_a_long_source_request(self):
+        async def resolve(client, peer):
+            current = json.loads((self.folder / "monitor-status.json").read_text())
+            self.assertEqual(current["phase"], "scanning")
+            self.assertEqual(current["sources"][0]["status"], "scanning")
+            self.assertIn("last_progress_at", current["sources"][0])
+            raise ConnectionError("simulated slow source")
+
+        result = asyncio.run(monitor_round(None, self.folder, [self.source], self.save, self.normalize, resolve, until=self.until))
+        self.assertEqual(result["sources"][0]["error"], "ConnectionError")
 
 
 if __name__ == "__main__":

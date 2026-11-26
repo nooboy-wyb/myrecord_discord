@@ -10,6 +10,7 @@ const reporter = createPageStatusReporter({labels:{[first]:'颜驰',[second]:'�
   saveDiagnostic:event=>diagnostics.push(event)});
 
 reporter.warnIfNoReport();
+assert.equal(reporter.health(),null);
 assert(logs.some(line=>line.includes('尚未收到扩展')));
 const missing = reporter.report({enabled:[first,second],open:[first],scanning:[first]});
 assert.equal(missing.issues.length,1);
@@ -17,11 +18,14 @@ assert(logs.some(line=>line.includes('交流频道：Discord 页面未打开')))
 assert.equal(diagnostics.length,1);
 reporter.report({enabled:[first,second],open:[first],scanning:[first]});
 assert.equal(diagnostics.length,1,'unchanged reports must not repeat the reminder');
+assert.equal(reporter.health().enabled.length,2,'health must retain fresh unchanged page reports');
+assert(Number.isFinite(Date.parse(reporter.health().at)));
 const stalled = reporter.report({enabled:[first,second],open:[first,second],scanning:[first]});
 assert.equal(stalled.issues[0].status,'页面已打开，但扫描无响应');
 assert(logs.some(line=>line.includes('交流频道：页面已打开，但扫描无响应')));
 const healthy = reporter.report({enabled:[first,second],open:[first,second],scanning:[first,second]});
 assert.equal(healthy.issues.length,0);
+assert.deepEqual(reporter.health().issues,[]);
 assert.equal(diagnostics.length,3);
 const removed = reporter.report({enabled:[first],open:[first],scanning:[first]});
 assert.equal(removed.issues.length,0,'a channel removed from extension settings is not monitored');

@@ -136,7 +136,7 @@ const server = http.createServer((req, res) => {
   const reply = (status, value) => {res.writeHead(status, {'Content-Type':'application/json'}); res.end(JSON.stringify(value));};
   if (req.method === 'GET' && req.url === '/v1/health') {
     if (!authorized(req)) return reply(401,{error:'unauthorized'});
-    return reply(200,{...collectorHealth,at:new Date().toISOString()});
+    return reply(200,{...collectorHealth,pages:pageStatusReporter.health(),at:new Date().toISOString()});
   }
   if (req.method === 'POST' && req.url === '/v1/collector/page-status') {
     if (!authorized(req)) return reply(401,{error:'unauthorized'});
@@ -201,6 +201,7 @@ const server = http.createServer((req, res) => {
       const id = save(message);
       collectorHealth.last_capture_at = new Date().toISOString();
       collectorHealth.received++;
+      collectorHealth.last_storage_error = null;
       try {
         const diagnostic = captureDiagnostic(message,receivedAt,Date.now(),crypto.randomUUID());
         if (diagnostic) saveDiagnostic(diagnostic);
@@ -214,8 +215,10 @@ const server = http.createServer((req, res) => {
     }
     catch (error) {
       if (error instanceof CaptureValidationError || error instanceof SyntaxError) {
+        collectorHealth.last_validation_error = {at:new Date().toISOString(),error:error instanceof SyntaxError ? 'Malformed JSON' : String(error.message).slice(0,500)};
         reply(400,{error:String(error.message)});
       } else {
+        collectorHealth.last_storage_error = {at:new Date().toISOString(),error:String(error.code || error.name),message:String(error.message).slice(0,500)};
         console.error('Capture storage failed:',error.code || error.name);
         reply(503,{error:'Capture storage unavailable; retry this message'});
       }

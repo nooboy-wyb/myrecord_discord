@@ -10,6 +10,7 @@ function ids(value) {
 function createPageStatusReporter({labels,log = console,saveDiagnostic}) {
   let lastSignature = '';
   let lastReportAt = 0;
+  let latest = null;
   function report(body) {
     const expected = ids(body?.enabled);
     const enabled = new Set(expected);
@@ -23,6 +24,7 @@ function createPageStatusReporter({labels,log = console,saveDiagnostic}) {
       if (!scanning.has(id)) return {id,status:'页面已打开，但扫描无响应'};
       return null;
     }).filter(Boolean);
+    latest = {at:new Date(lastReportAt).toISOString(),enabled:expected,open:[...open],scanning:[...scanning],issues};
     const signature = JSON.stringify({expected:[...expected].sort(),issues});
     if (signature === lastSignature) return {changed:false,issues};
     lastSignature = signature;
@@ -35,7 +37,7 @@ function createPageStatusReporter({labels,log = console,saveDiagnostic}) {
   function warnIfNoReport() {
     if (!lastReportAt) log.warn('Discord 页面检查：尚未收到扩展的页面清单；请检查 Edge、采集扩展和频道标签页。');
   }
-  return {report,warnIfNoReport};
+  return {report,warnIfNoReport,health:() => latest};
 }
 
 module.exports = {createPageStatusReporter};
