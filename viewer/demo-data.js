@@ -1,0 +1,45 @@
+/* Deliberately synthetic. This preview never reads production data or contacts a bot. */
+(() => {
+  const picture = (id, type = 'chart', status = 'saved') => ({id, status,
+    name: type === 'chart' ? '观察区间示意.svg' : '盘中观察笔记.svg',
+    url: status === 'saved' ? `assets/${type === 'chart' ? 'chart' : 'notes'}-demo.svg` : null,
+    size: type === 'chart' ? '960 × 480' : '760 × 480',
+    error: status === 'failed' ? '下载请求超时，等待下一次重试' : null});
+  const messages = [
+    {id:'tg-1048',source:'telegram',channel:'Yekoi · 盘中状态更新',author:'Yekoi',messageId:'demo:tg:1048',
+      body:'盘中观察更新：先看区间内的变化，暂时保持观察。\n图中标出了需要继续跟踪的位置，后续有变化再补充。',
+      sourceTime:'14:25:40',capturedTime:'14:25:53',enqueuedTime:'14:25:54',attemptTime:'14:27:52',acceptedTime:'14:27:54',
+      status:'accepted',group:'盘中观察群',attempts:1,origin:'实时',images:[picture('tg-1048-1')],
+      qqBody:'【Yekoi盘中状态更新 · 14:25】\n盘中观察更新：先看区间内的变化，暂时保持观察。\n图中标出了需要继续跟踪的位置，后续有变化再补充。',
+      totalSeconds:134,captureSeconds:13,sendSeconds:121,version:1},
+    {id:'dc-2087',source:'discord',channel:'研究讨论 · 盘中交流',author:'Lin',messageId:'demo:dc:2087',
+      body:'今日的观察记录已经整理好了，附上两张示意图。\n先核对上下文，再结合后续消息一起看。',
+      sourceTime:'14:24:12',capturedTime:'14:24:17',enqueuedTime:'14:24:18',attemptTime:'14:24:20',acceptedTime:'14:24:26',
+      status:'accepted',group:'研究讨论群',attempts:1,origin:'实时',images:[picture('dc-2087-1'),picture('dc-2087-2','notes')],
+      qqBody:'【研究讨论 · 盘中交流】\nLin · 14:24\n今日的观察记录已经整理好了，附上两张示意图。\n先核对上下文，再结合后续消息一起看。',totalSeconds:14,captureSeconds:5,sendSeconds:9,version:1},
+    {id:'tg-1047',source:'telegram',channel:'Yekoi · 策略记录',author:'Yekoi',messageId:'demo:tg:1047',
+      body:'补充一条记录：前面的观察条件还没有发生变化，继续等待更新。',sourceTime:'14:23:06',capturedTime:'14:23:14',enqueuedTime:'14:23:15',
+      status:'queued',group:'盘中观察群',attempts:0,origin:'实时',images:[],version:2,reason:'任务已入队，等待发送器调度。详细等待原因尚未记录。'},
+    {id:'dc-2086',source:'discord',channel:'资料归档 · 图片记录',author:'Yu',messageId:'demo:dc:2086',
+      body:'这条记录附带一张观察笔记，图片还在下载中。',sourceTime:'14:22:18',capturedTime:'14:22:22',enqueuedTime:'14:22:23',attemptTime:'14:22:25',
+      status:'deferred',group:'资料归档群',attempts:2,origin:'实时',images:[picture('dc-2086-1','notes','failed')],version:1,
+      reason:'附件下载超时，原图尚未就绪；发送任务已延后。',nextAttempt:'14:28:10'},
+    {id:'dc-2085',source:'discord',channel:'研究讨论 · 盘中交流',author:'Qin',messageId:'demo:dc:2085',
+      body:'稍早的讨论补充在这里：记录以原消息为准，后续编辑会保留版本。',sourceTime:'14:20:02',capturedTime:'14:20:08',enqueuedTime:'14:20:09',attemptTime:'14:20:11',acceptedTime:'14:20:12',
+      status:'accepted',group:'研究讨论群',attempts:1,origin:'实时',images:[],version:1,totalSeconds:10,captureSeconds:6,sendSeconds:4},
+    {id:'tg-1046',source:'telegram',channel:'RA · 观察笔记',author:'RA',messageId:'demo:tg:1046',
+      body:'观察笔记更新：把当前状态记下来，便于晚些时候回看。',sourceTime:'14:18:30',capturedTime:'14:18:41',enqueuedTime:'14:18:42',attemptTime:'14:18:44',acceptedTime:'14:18:46',
+      status:'accepted',group:'资料归档群',attempts:1,origin:'实时',images:[picture('tg-1046-1','notes')],version:1,totalSeconds:16,captureSeconds:11,sendSeconds:5},
+    {id:'dc-2084',source:'discord',channel:'研究讨论 · 历史记录',author:'Chen',messageId:'demo:dc:2084',
+      body:'昨天的补充记录，今天通过历史补发进入队列。请结合原消息时间查看。',sourceTime:'11-26 16:42:08',capturedTime:'14:15:02',enqueuedTime:null,attemptTime:'14:16:22',
+      status:'unknown',group:'研究讨论群',attempts:1,origin:'历史补发',images:[],version:1,
+      reason:'请求已提交，但未获得确定结果。该条已隔离，请核对群内记录；不会自动重发。'},
+    {id:'tg-1045',source:'telegram',channel:'RA · 观察笔记',author:'RA',messageId:'demo:tg:1045',
+      body:'上午的内容已整理，文字与图片一起归档。',sourceTime:'14:10:11',capturedTime:'14:10:19',enqueuedTime:'14:10:20',attemptTime:'14:10:22',acceptedTime:'14:10:24',
+      status:'accepted',group:'资料归档群',attempts:1,origin:'实时',images:[],version:1,totalSeconds:13,captureSeconds:8,sendSeconds:5},
+    {id:'dc-2083',source:'discord',channel:'资料归档 · 图片记录',author:'Yu',messageId:'demo:dc:2083',
+      body:'这张示意图用于记录今天的观察过程。',sourceTime:'14:08:05',capturedTime:'14:08:09',enqueuedTime:'14:08:10',attemptTime:'14:08:12',acceptedTime:'14:08:14',
+      status:'accepted',group:'资料归档群',attempts:1,origin:'实时',images:[picture('dc-2083-1')],version:1,totalSeconds:9,captureSeconds:4,sendSeconds:5}
+  ];
+  window.MUSE_DEMO = {messages, picture, date:'2026-11-27', sampledAt:'14:28:00'};
+})();

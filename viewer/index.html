@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#183c34">
+  <title>Muse · 内容观察台</title>
+  <link rel="icon" href="assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="demo-data.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview" aria-label="Muse 内容观察台首页"><img src="assets/mark.svg" alt="" width="35" height="35"><span>muse<span class="brand-caption">内容观察台</span></span><span class="version">01</span></a>
+      <div class="workspace"><span class="workspace-icon">M</span><div><strong>我的采集空间</strong><span>Discord / Telegram → QQ</span></div></div>
+      <p class="nav-caption">工作空间</p>
+      <nav id="navigation">
+        <a href="#overview" data-view="overview" class="nav-item active" aria-current="page"><span data-icon="grid"></span>实时总览</a>
+        <a href="#discord" data-view="discord" class="nav-item"><span data-icon="discord"></span>DC 采集<span class="nav-count" id="dc-count">—</span></a>
+        <a href="#telegram" data-view="telegram" class="nav-item"><span data-icon="telegram"></span>TG 采集<span class="nav-count" id="tg-count">—</span></a>
+        <a href="#queue" data-view="queue" class="nav-item"><span data-icon="send"></span>QQ 发送队列<span class="nav-count warm" id="queue-count">—</span></a>
+        <a href="#connections" data-view="connections" class="nav-item"><span data-icon="activity"></span>连接与异常</a>
+      </nav>
+      <div class="sidebar-note"><span data-icon="shield"></span><strong>只读查看 · 按需打开</strong><p>查看采集与发送记录<br>采集、发送独立运行</p></div>
+      <div class="sidebar-footer"><span class="avatar">M</span><div>本地查看入口<span>前端初稿 v0.1</span></div><span data-icon="monitor"></span></div>
+    </aside>
+
+    <div class="workspace-main">
+      <header class="topbar"><div class="breadcrumb">工作空间<span>/</span><strong id="breadcrumb-current">实时总览</strong></div><div class="topbar-right"><span class="read-only"><span data-icon="lock"></span>只读模式</span><span class="topbar-divider"></span><span class="demo-tag">DEMO</span><span class="remote-label">未连接远端</span></div></header>
+      <main id="main-content">
+        <div class="page-heading"><div><div class="eyebrow">YOUR MESSAGE WORKSPACE</div><h1 id="page-title">实时总览</h1><p id="page-description">从采集原文到 QQ 回执，每一步都看得见。</p></div><div class="heading-actions"><div class="sample-date"><span data-icon="calendar"></span>2026 年 11 月 27 日<span>北京时间</span></div><button id="refresh" class="button secondary"><span data-icon="refresh"></span>刷新演示</button></div></div>
+
+        <div class="demo-banner"><span class="banner-symbol" data-icon="flask"></span><div><strong>正在预览前端初稿</strong><span>内容、图片和连接状态均为演示，尚未读取远端数据。</span></div><button id="simulate" class="text-button">模拟一条新消息<span data-icon="arrow-right"></span></button></div>
+        <section class="metrics" aria-label="演示数据概况" id="metrics"></section>
+        <div class="content-toolbar"><div class="view-heading"><h2 id="section-title">三路消息动态</h2><span class="soft-label" id="section-label">落盘内容与发送记录</span></div><div class="filter-controls"><label class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="搜索正文、频道或消息 ID" aria-label="搜索正文、频道或消息 ID"><kbd>/</kbd></label><select id="status-filter" aria-label="筛选消息状态"><option value="all">全部状态</option><option value="attention">需要关注</option><option value="pending">待处理</option><option value="accepted">已接受</option><option value="image">包含图片</option></select><select id="group-filter" aria-label="筛选目标群" hidden><option value="all">全部目标群</option><option value="研究讨论群">研究讨论群</option><option value="盘中观察群">盘中观察群</option><option value="资料归档群">资料归档群</option></select></div></div>
+        <div id="view-content"></div>
+        <footer class="page-footer"><span><span class="subtle-dot"></span>演示数据 · 不代表远端当前状态</span><span id="refresh-label">预览已就绪<span class="footer-separator">·</span>按需加载图片</span></footer>
+      </main>
+    </div>
+  </div>
+
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="detail-drawer" class="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="detail-title" hidden tabindex="-1">
+    <div class="drawer-top"><span class="eyebrow">MESSAGE INSPECTOR</span><button id="close-drawer" class="icon-button" aria-label="关闭消息详情"><span data-icon="close"></span></button></div>
+    <div id="detail-heading"></div>
+    <div class="detail-tabs" role="tablist" aria-label="消息详情"><button id="tab-content" role="tab" data-detail-tab="content" aria-controls="detail-content" aria-selected="true" tabindex="0">消息内容</button><button id="tab-trace" role="tab" data-detail-tab="trace" aria-controls="detail-content" aria-selected="false" tabindex="-1">处理追踪</button><button id="tab-parts" role="tab" data-detail-tab="parts" aria-controls="detail-content" aria-selected="false" tabindex="-1">QQ 分段</button></div>
+    <div id="detail-content" class="detail-content" role="tabpanel" aria-labelledby="tab-content"></div>
+    <div class="drawer-bottom"><span data-icon="lock"></span>仅展示演示记录，不执行发送操作</div>
+  </aside>
+
+  <dialog id="image-dialog" aria-labelledby="image-title"><div class="image-dialog-header"><div><strong id="image-title">归档图片预览</strong><span>本地生成的演示图片</span></div><button id="close-image" class="icon-button" aria-label="关闭图片预览"><span data-icon="close"></span></button></div><img id="full-image" alt="归档图片演示"><p id="image-description"></p></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
