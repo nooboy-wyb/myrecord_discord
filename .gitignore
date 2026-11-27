@@ -16,4 +16,5 @@ scripts/enable_local_winrm.ps1
 scripts/trust_target_winrm.ps1
 scripts/install_local_sshd.ps1
 scripts/connect_target_ssh.ps1
+scripts/open_target_viewer.ps1
 __pycache__/
