@@ -201,6 +201,78 @@ class MonitorTests(unittest.TestCase):
         result = asyncio.run(monitor_round(None, self.folder, [self.source], self.save, self.normalize, resolve, until=self.until))
         self.assertEqual(result["sources"][0]["error"], "ConnectionError")
 
+    def test_stalled_resolve_and_message_request_timeout_without_advancing_checkpoint(self):
+        self.round({"-1001": [self.message(1)]})
+        async def stalled_resolve(*args):
+            await asyncio.Event().wait()
+        async def validate(*args):
+            pass
+        async def resolve(*args):
+            return SimpleNamespace(peer_id="-1001")
+        class Client:
+            async def iter_messages(self, *args, **kwargs):
+                await asyncio.Event().wait()
+                yield None
+        for resolver in [stalled_resolve, resolve]:
+            with patch("monitor.REQUEST_TIMEOUT", 0.02):
+                result = asyncio.run(monitor_round(Client(), self.folder, [self.source], self.save,
+                    self.normalize, resolver, validate, self.until+timedelta(hours=2)))
+            self.assertTrue(result["reconnect_required"])
+            self.assertEqual(result["sources"][0]["error"], "TimeoutError")
+            archive = Archive(self.folder)
+            try:
+                self.assertEqual(archive.connection.execute("SELECT scan_until FROM telegram_monitor_state").fetchone()[0],
+                                 self.until.isoformat())
+            finally:
+                archive.close()
+
+    def test_timeout_replaces_client_and_marks_recovered_only_after_successful_scan(self):
+        file = self.folder/"sources.json"
+        file.write_text('{"sources": []}')
+        clock = [0.0]
+        disconnected = []
+        class Client:
+            def __init__(self, broken):
+                self.broken = broken
+            def is_connected(self):
+                return True
+            async def is_user_authorized(self):
+                if self.broken:
+                    raise TimeoutError("stalled authorization request")
+                return True
+            async def disconnect(self):
+                disconnected.append(self.broken)
+        made = []
+        def factory():
+            made.append(True)
+            return Client(False)
+        async def sleep(seconds):
+            recovery = json.loads((self.folder/"connection-recovery.json").read_text())
+            self.assertEqual(recovery["state"], "retrying" if not clock[0] else "recovered")
+            clock[0] += 0.6
+        with patch("monitor.time.monotonic", side_effect=lambda: clock[0]), patch("monitor.asyncio.sleep", side_effect=sleep), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(monitor(Client(True), self.folder, SimpleNamespace(config=file, seconds=1),
+                                self.save, self.normalize, None, client_factory=factory))
+        self.assertEqual(made, [True])
+        self.assertEqual(disconnected, [True, False])
+        self.assertEqual(json.loads((self.folder/"connection-recovery.json").read_text())["state"], "recovered")
+
+    def test_unauthorized_session_does_not_rebuild_or_claim_network_recovery(self):
+        file = self.folder/"sources.json"
+        file.write_text('{"sources": []}')
+        clock = [0.0]
+        class Client:
+            def is_connected(self):
+                return True
+            async def is_user_authorized(self):
+                clock[0] = 2.0
+                return False
+        with patch("monitor.time.monotonic", side_effect=lambda: clock[0]), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(monitor(Client(), self.folder, SimpleNamespace(config=file, seconds=1),
+                                self.save, self.normalize, None, client_factory=lambda: self.fail("must not rebuild")))
+        self.assertFalse((self.folder/"connection-recovery.json").exists())
+        self.assertEqual(json.loads((self.folder/"monitor-status.json").read_text())["error"], "PermissionError")
+
 
 if __name__ == "__main__":
     unittest.main()

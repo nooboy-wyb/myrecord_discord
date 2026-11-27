@@ -163,6 +163,8 @@ async def save_message(client, archive, entity, message):
             archive.attachment_result(attachment["id"], "saved", saved, digest)
         except Exception as failure:
             archive.attachment_result(attachment["id"], "failed", error=type(failure).__name__)
+            if isinstance(failure, (TimeoutError, ConnectionError)):
+                raise
         finally:
             temporary.unlink(missing_ok=True)
     return inserted
@@ -226,13 +228,14 @@ async def run(args):
     if args.action == "configure":
         configure(folder)
         return 0
+    if args.action == "monitor":
+        from monitor import monitor
+
+        await monitor(create_client(folder), folder, args, save_message, normalize, resolve_channel,
+                      client_factory=lambda: create_client(folder))
+        return 0
     client = create_client(folder)
     try:
-        if args.action == "monitor":
-            from monitor import monitor
-
-            await monitor(client, folder, args, save_message, normalize, resolve_channel)
-            return 0
         await asyncio.wait_for(client.connect(), timeout=25)
         if args.action == "login":
             await login(client, folder, args.login_method)

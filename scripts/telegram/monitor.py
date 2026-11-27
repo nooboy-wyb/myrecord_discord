@@ -3,11 +3,31 @@ import contextlib
 import json
 import os
 import re
+import socket
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from archive import Archive, utc_now
 from history import parse_until, verify_message, write_json_atomic
+
+REQUEST_TIMEOUT = 30
+SAVE_TIMEOUT = 90
+DISCONNECT_TIMEOUT = 10
+NETWORK_ERRNOS = {10050, 10051, 10052, 10053, 10054, 10060, 10061, 10064, 10065, 101, 104, 110, 111, 113}
+
+
+def connection_failure(failure):
+    if isinstance(failure, (ConnectionError, TimeoutError, socket.gaierror, socket.herror)):
+        return True
+    if isinstance(failure, OSError):
+        return failure.errno in NETWORK_ERRNOS or getattr(failure, "winerror", None) in NETWORK_ERRNOS
+    return type(failure).__name__ in {"ServerError", "TimedOutError", "RpcCallFailError", "ReadCancelledError"}
+
+
+async def disconnect(client):
+    if hasattr(client, "disconnect"):
+        await asyncio.wait_for(client.disconnect(), timeout=DISCONNECT_TIMEOUT)
 
 
 def failure_detail(failure):
@@ -93,12 +113,17 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
                 cursor = archive.connection.execute("SELECT scan_until FROM telegram_monitor_state WHERE source_key=?", (key,)).fetchone()
                 since = max(enabled, parse_until(cursor["scan_until"])-timedelta(minutes=2)) if cursor else enabled
                 detail.update(since=since.isoformat(), until=until.isoformat())
-                entity = await resolve_channel(client, source["peer_id"])
-                await topic_validator(client, entity, source)
+                entity = await asyncio.wait_for(resolve_channel(client, source["peer_id"]), REQUEST_TIMEOUT)
+                await asyncio.wait_for(topic_validator(client, entity, source), REQUEST_TIMEOUT)
                 options = {"limit": None, "offset_date": until}
                 if source.get("topic_id") is not None:
                     options["reply_to"] = source["topic_id"]
-                async for message in client.iter_messages(entity, **options):
+                iterator = client.iter_messages(entity, **options).__aiter__()
+                while True:
+                    try:
+                        message = await asyncio.wait_for(iterator.__anext__(), REQUEST_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
                     if message.date is None:
                         raise ValueError("Undated source message")
                     if message.date < since:
@@ -108,7 +133,8 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
                     expected = normalize(entity, message)
                     if source.get("topic_id") is not None and expected.get("topic_id") != str(source["topic_id"]):
                         raise ValueError("Message belongs to another topic")
-                    detail["inserted"] += await save_message(client, archive, entity, message)
+                    detail["inserted"] += await asyncio.wait_for(
+                        save_message(client, archive, entity, message), SAVE_TIMEOUT)
                     detail["read"] += 1
                     if verify_message(archive, expected)[2]:
                         raise RuntimeError("Archive or image verification failed; checkpoint retained")
@@ -125,9 +151,13 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
                 detail.update(status="ok", scan_until=until.isoformat(), scan_complete_to_boundary=True)
             except Exception as failure:
                 detail.update(status="error", **failure_detail(failure))
+                if connection_failure(failure):
+                    status.update(reconnect_required=True, **failure_detail(failure))
             detail["finished_at"] = utc_now()
             status["at"] = utc_now()
             write_json_atomic(folder / "monitor-status.json", status)
+            if status.get("reconnect_required"):
+                break
     finally:
         archive.close()
     status["at"] = utc_now()
@@ -136,22 +166,50 @@ async def monitor_round(client, folder, sources, save_message, normalize, resolv
     return status
 
 
-async def monitor(client, folder, args, save_message, normalize, resolve_channel):
+async def monitor(client, folder, args, save_message, normalize, resolve_channel, client_factory=None):
     file = args.config or folder / "sources.json"
     deadline = time.monotonic()+args.seconds if args.seconds else None
+    recovery_file = folder / "connection-recovery.json"
+    recovery = json.loads(recovery_file.read_text(encoding="utf-8")) if recovery_file.exists() else None
+    failures = 0
     with monitor_lock(folder):
-        while deadline is None or time.monotonic() < deadline:
-            try:
-                sources = read_sources(file)
-                if not client.is_connected():
-                    await asyncio.wait_for(client.connect(), timeout=25)
-                if not await client.is_user_authorized():
-                    raise PermissionError("Telegram session is unauthorized")
-                status = await monitor_round(client, folder, sources, save_message, normalize, resolve_channel)
-            except Exception as failure:
-                status = {"role": "telegram-collector", "at": utc_now(), **failure_detail(failure)}
+        try:
+            while deadline is None or time.monotonic() < deadline:
+                reconnect = False
+                try:
+                    sources = read_sources(file)
+                    if not client.is_connected():
+                        await asyncio.wait_for(client.connect(), timeout=25)
+                    if not await asyncio.wait_for(client.is_user_authorized(), REQUEST_TIMEOUT):
+                        raise PermissionError("Telegram session is unauthorized")
+                    status = await monitor_round(client, folder, sources, save_message, normalize, resolve_channel)
+                    reconnect = status.get("reconnect_required", False)
+                except Exception as failure:
+                    status = {"role": "telegram-collector", "at": utc_now(), **failure_detail(failure)}
+                    reconnect = connection_failure(failure)
+                if reconnect:
+                    failures += 1
+                    if not recovery or recovery["state"] == "recovered":
+                        recovery = {"id": "telegram-" + str(uuid.uuid4()), "state": "retrying",
+                                    "started_at": utc_now(), "attempts": 0}
+                    recovery.update(state="retrying", attempts=recovery["attempts"]+1,
+                                    error=status.get("error", "ConnectionError"), last_failure_at=utc_now())
+                    write_json_atomic(recovery_file, recovery)
+                elif (not status.get("error") and all(item["status"] == "ok" for item in status.get("sources", []))):
+                    failures = 0
+                    if recovery and recovery["state"] != "recovered":
+                        recovery.update(state="recovered", recovered_at=utc_now())
+                        write_json_atomic(recovery_file, recovery)
                 write_json_atomic(folder / "monitor-status.json", status)
-            print(json.dumps(status, ensure_ascii=False), flush=True)
-            if deadline is not None and time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(min(10, max(0, deadline-time.monotonic())) if deadline else 10)
+                print(json.dumps(status, ensure_ascii=False), flush=True)
+                if reconnect:
+                    # A disconnect that cannot finish exits this worker; the supervisor owns process recovery.
+                    await disconnect(client)
+                    if client_factory:
+                        client = client_factory()
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                delay = min(60, 10 * 2 ** min(max(0, failures-1), 3))
+                await asyncio.sleep(min(delay, max(0, deadline-time.monotonic())) if deadline else delay)
+        finally:
+            await disconnect(client)

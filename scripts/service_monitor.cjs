@@ -6,6 +6,7 @@ const {promisify} = require('node:util');
 const {DatabaseSync} = require('node:sqlite');
 const {acquireLock} = require('./qq/core/process_lock.cjs');
 const {writeHandoffs} = require('./monitor_handoff.cjs');
+const {notifyTelegram} = require('./monitor_notices.cjs');
 
 const policy = {window_ms:3600000,max_restarts:3,cooldown_ms:300000,startup_ms:120000,missing_checks:2,stale_ms:300000,backlog_ms:900000};
 const roles = ['discord','telegram','qq'];
@@ -33,12 +34,19 @@ function age(value,now) {
 function transition(previous = {}, observation, now, options = policy) {
   const restarts = (previous.restarts || []).filter(stamp => stamp > now-options.window_ms);
   const base = {restarts,last_start_at:previous.last_start_at ?? null,
+    stalled_count:observation.stalled ? (previous.stalled_count || 0)+1 : 0,
     missing_count:observation.running || observation.inspection_error ? 0 : (previous.missing_count || 0)+1,action:'none'};
-  if (observation.paused) return {...base,missing_count:0,state:'PAUSED'};
-  if (observation.inspection_error) return {...base,state:'INSPECTION_FAILED'};
+  if (observation.paused) return {...base,stalled_count:0,missing_count:0,state:'PAUSED'};
+  if (observation.inspection_error) return {...base,stalled_count:0,state:'INSPECTION_FAILED'};
   if (observation.running) {
     if (observation.issues.length && previous.last_start_at != null && now-previous.last_start_at < options.startup_ms)
       return {...base,state:'STARTING'};
+    if (observation.stalled && observation.recover && !observation.recovery_blocked
+        && base.stalled_count >= options.missing_checks) {
+      if (restarts.length >= options.max_restarts) return {...base,state:'RESTART_LIMITED'};
+      if (restarts.length && now-restarts.at(-1) < options.cooldown_ms) return {...base,state:'COOLDOWN'};
+      return {...base,state:'DEGRADED',action:'restart'};
+    }
     return {...base,state:observation.issues.length ? 'DEGRADED' : 'HEALTHY'};
   }
   if (previous.state !== 'START_FAILED' && previous.last_start_at != null && now-previous.last_start_at < options.startup_ms)
@@ -77,7 +85,7 @@ function processMatches(command,entry) {
 }
 async function inspectProcesses() {
   const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';
-    $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','python.exe','pythonw.exe','powershell.exe','pwsh.exe') } | Select-Object ProcessId,ParentProcessId,Name,CommandLine);
+    $processes=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','python.exe','pythonw.exe','powershell.exe','pwsh.exe') } | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{n='CreatedAt';e={$_.CreationDate.ToUniversalTime().ToString('o')}});
     $listeners=@(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -in @(8765,8766) } | Select-Object LocalPort,OwningProcess);
     @{processes=$processes;listeners=$listeners} | ConvertTo-Json -Depth 4 -Compress`;
   const {stdout} = await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
@@ -172,6 +180,7 @@ function assess(role,{processes = [],listeners = [],health:probe = {},telegram,q
   const issues = [];
   const issue = (code,detail = {}) => issues.push({code,...detail,...classifyError(`${code} ${detail.error || ''} ${detail.message || ''}`)});
   const result = {running:matches.length > 0,starting:launchers.length > 0,pids:matches.map(item => item.ProcessId),
+    process_identities:matches.map(item => ({pid:item.ProcessId,created_at:item.CreatedAt})),
     port_busy:listeners.some(item => Number(item.LocalPort) === (role === 'discord' ? 8765 : role === 'qq' ? 8766 : -1)),
     health_present:!!probe.present,inspection_error,paused,recover,issues};
   if (result.starting && !result.running) issue('LAUNCHER_WITHOUT_PROCESS');
@@ -232,8 +241,22 @@ function assess(role,{processes = [],listeners = [],health:probe = {},telegram,q
     }
     for (const error of queue?.recent_errors || []) issue('QUEUE_ERROR',{...error,error:safeText(error.error)});
   }
-  result.recovery_blocked = !result.running && issues.some(item => ['AUTHORIZATION','PERMISSION'].includes(item.category));
+  result.recovery_blocked = issues.some(item => ['AUTHORIZATION','PERMISSION'].includes(item.category));
+  result.stalled = role === 'telegram' && result.running && instances.length === 1
+    && Number.isFinite(Date.parse(telegram?.at)) && age(telegram.at,now) > policy.stale_ms
+    && result.process_identities.every(item => Number.isSafeInteger(item.pid) && Number.isFinite(Date.parse(item.created_at)))
+    && !result.recovery_blocked;
+  if (result.stalled) issues.find(item => item.code === 'SCAN_STATUS_STALE').handling = 'restart_verified_stall';
   return result;
+}
+async function stopStalledTelegram(observation,project,root) {
+  const {stdout} = await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+    '-File',path.join(project,'scripts','stop_stalled_telegram.ps1'),
+    '-DataDirectory',path.join(root,'telegram'),'-EntryPoint',path.join(project,'scripts','telegram','collector.py'),
+    '-ExpectedStatusAt',observation.scan.at,'-ExpectedProcesses',
+    Buffer.from(JSON.stringify(observation.process_identities)).toString('base64')],
+    {windowsHide:true,timeout:25000,maxBuffer:131072});
+  return JSON.parse(stdout.trim().replace(/^\uFEFF/,''));
 }
 async function launch(role,project,root,now) {
   if (role === 'qq' && !fs.existsSync(path.join(root,'qq-bot-credential.xml'))) throw Error('QQ credential missing; configure interactively');
@@ -274,7 +297,8 @@ function incidents(previous,observations,at,append) {
   return active;
 }
 async function run({project = path.resolve(__dirname,'..'),root = path.resolve(process.env.MUSE_DATA_DIR || path.join(project,'data')),
-  recover = false,recoverRoles = roles,inspect = inspectProcesses,probe = health,start = launch,now = Date.now()} = {}) {
+  recover = false,recoverRoles = roles,inspect = inspectProcesses,probe = health,start = launch,
+  stop = stopStalledTelegram,notify = notifyTelegram,now = Date.now()} = {}) {
   if (!Array.isArray(recoverRoles) || !recoverRoles.length || recoverRoles.some(role => !roles.includes(role)))
     throw Error('Invalid recovery role');
   const folder = path.join(root,'monitor');
@@ -289,7 +313,8 @@ async function run({project = path.resolve(__dirname,'..'),root = path.resolve(p
       const state = previous.roles[role];
       if (state && (!Array.isArray(state.restarts) || state.restarts.some(stamp => !Number.isFinite(stamp))
           || (state.last_start_at != null && !Number.isFinite(state.last_start_at))
-          || !Number.isInteger(state.missing_count) || state.missing_count < 0))
+          || !Number.isInteger(state.missing_count) || state.missing_count < 0
+          || (state.stalled_count != null && (!Number.isInteger(state.stalled_count) || state.stalled_count < 0))))
         throw Error('Invalid monitor recovery budget; manual inspection required');
     }
     const at = new Date(now).toISOString();
@@ -330,16 +355,24 @@ async function run({project = path.resolve(__dirname,'..'),root = path.resolve(p
       decision.consecutive_failures = decision.state === 'HEALTHY' || decision.state === 'PAUSED' ? 0 : (previous.roles[role]?.consecutive_failures || 0)+1;
       decision.first_failure_at = decision.consecutive_failures ? previous.roles[role]?.first_failure_at || at : null;
       decision.last_success_at = decision.state === 'HEALTHY' ? at : previous.roles[role]?.last_success_at ?? null;
-      if (decision.action === 'start') {
+      if (['start','restart'].includes(decision.action)) {
         decision.restarts.push(now);
         decision.last_start_at = now;
         next[role] = {...decision,state:'STARTING'};
         atomicJson(stateFile,{...previous,roles:{...previous.roles,...next}});
         try {
+          if (decision.action === 'restart') {
+            observation.stopped = await stop(observation,project,root);
+            append({event:'stalled_process_stopped',role,...observation.stopped});
+            const refreshed = await inspect();
+            const checked = assess('telegram',{...refreshed,telegram},Date.now(),project,root);
+            if (checked.inspection_error || checked.running || checked.instance_count)
+              throw Error('Telegram process absence could not be confirmed after stopping stalled worker');
+          }
           observation.recovery = await start(role,project,root,now);
           decision.last_launch = observation.recovery;
           decision.state = 'STARTING';
-          append({event:'restart_started',role,reason:'confirmed_process_absent',...observation.recovery});
+          append({event:'restart_started',role,reason:decision.action === 'restart' ? 'confirmed_scan_stall' : 'confirmed_process_absent',...observation.recovery});
         } catch (error) {
           decision.state = 'START_FAILED';
           observation.issues.push({code:'START_FAILED',error:safeText(error.message)});
@@ -358,6 +391,12 @@ async function run({project = path.resolve(__dirname,'..'),root = path.resolve(p
     catch (error) {
       report.handoff_error = 'HANDOFF_WRITE_FAILED';
       append({event:'handoff_failed',error:safeText(error.message)});
+    }
+    atomicJson(path.join(folder,'status.json'),report);
+    try {report.notifications = await notify({project,root,report,now,append});}
+    catch (error) {
+      report.notification_error = 'TELEGRAM_NOTICE_FAILED';
+      append({event:'notification_failed',role:'telegram',error:safeText(error.message)});
     }
     atomicJson(path.join(folder,'status.json'),report);
     return report;
@@ -403,4 +442,4 @@ async function main(args) {
 if (require.main === module) main(process.argv.slice(2)).catch(error => {
   console.error(`Monitor failed: ${safeText(error.message)}`);process.exitCode = 1;
 });
-module.exports = {policy,transition,processMatches,gatewayStatus,assess,incidents,run,launch,safeText,scrub,classifyError,control,parseArguments};
+module.exports = {policy,transition,processMatches,gatewayStatus,assess,incidents,run,launch,stopStalledTelegram,safeText,scrub,classifyError,control,parseArguments};
