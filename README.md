@@ -4,6 +4,8 @@
 
 DC 采集、TG 采集与共享 QQ Bot 发送已按三个进程组织；独立启动、配置和本地测试见[进程拆分说明](docs/collector-processes.md)。
 
+三路实时内容查看、本地访问远端数据及单条追踪的设计见[查看后台方案](docs/collector-viewer-plan.md)（方案阶段，尚未部署）。
+
 Cloudflare Worker 每分钟并行检查黄金 XAU/USD、BTC/USD 和美股 SNDK。触及设定的下限或上限时，通过 AstrBot HTTP API 分别向微信、QQ 推送。每个方向触发一次，回到区间后重新布防；某个渠道投递失败会重试该渠道。
 
 ## 数据源和时效
