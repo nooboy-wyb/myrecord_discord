@@ -106,7 +106,7 @@ test('one explicitly shared route keeps TG planning and send checks enabled alon
   setup.insert(1);
   const file = path.join(setup.root,'qq-additional-routes.json');
   const route = JSON.parse(fs.readFileSync(file,'utf8')).routes[0];
-  route.channel_ids = ['1381634972372308060'];
+  route.channel_ids = ['1381635122989891594'];
   const configure = () => fs.writeFileSync(file,JSON.stringify({routes:[route]}));
   configure();
   assert.equal(planTelegram(setup.root,() => assert.fail('sharing must be explicit')).blocked.length,1);
@@ -115,7 +115,7 @@ test('one explicitly shared route keeps TG planning and send checks enabled alon
   const jobs = [];
   assert.equal(planTelegram(setup.root,(message,context) => jobs.push({message,context})).queued,1);
   assert.equal(telegramAllowed(setup.root,jobs[0].message,jobs[0].context),true);
-  for (const channelIds of [['invalid'],['1381634972372308060','1381634972372308060']]) {
+  for (const channelIds of [['invalid'],['1381635122989891594','1381635122989891594']]) {
     route.channel_ids = channelIds;
     configure();
     assert.equal(planTelegram(setup.root,() => assert.fail('invalid mixed route')).blocked.length,1);
@@ -127,7 +127,7 @@ test('Yekoi rules preserve other sources and stop a disabled source before plann
   const {decorateChannelLabel} = require('../scripts/qq/core/channel_title_style.cjs');
   assert.equal(decorateChannelLabel('telegram:-1004472038576:13613','old title'),'Yekoi盘中状态更新');
   assert.equal(decorateChannelLabel('telegram:-1001:13','other topic'),'other topic');
-  assert.equal(decorateChannelLabel('1381634972372308060','RA'),'🔵RA');
+  assert.equal(decorateChannelLabel('1381635122989891594','RA'),'🔵RA');
   const setup = fixture(t);
   setup.insert(1);
   const jobs = [];

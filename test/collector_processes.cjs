@@ -13,7 +13,7 @@ const project = path.resolve(__dirname,'..');
 const channel = '1265882617530814535';
 const primaryChannel = '1381176601802440744';
 const liveChannel = '1571167749558902885';
-const raChannel = '1381634972372308060';
+const raChannel = '1381635122989891594';
 const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
 async function freePort() {
   const server = net.createServer();
@@ -111,7 +111,8 @@ test('original DC routes survive QQ and TG downtime, drain once, and retain per-
   await capture(3,primaryChannel);
   await capture(4,liveChannel,true);
   await capture(5,raChannel);
-  assert.equal((await health(collectorPort)).received,5);
+  await capture(6,'1381634972372308060');
+  assert.equal((await health(collectorPort)).received,6);
   const unavailable = await request(collectorPort,`/v1/forwarding/status?channel_id=${channel}`);
   assert.equal(unavailable.status,503);
   const archive = new DatabaseSync(path.join(root,'telegram','archive.sqlite'),{readOnly:true});

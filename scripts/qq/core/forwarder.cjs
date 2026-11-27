@@ -16,7 +16,9 @@ const {createSourceIdentityGuard} = require('./source_identity.cjs');
 const {planTelegram,telegramAllowed} = require('./telegram_source.cjs');
 const alerts = require('./alerts.cjs');
 const exchangeChannelId = '1265882617530814535';
-const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId, '1381634972372308060']);
+// Keep the retired RA ID excluded from the primary group when rescanning its archive.
+const additionalChannelIds = new Set([...yanchi.channelIds, fengxun.channelId, exchangeChannelId,
+  '1381634972372308060', '1381635122989891594']);
 
 const root = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', '..', '..', 'data'));
 const target = JSON.parse(fs.readFileSync(path.join(root, 'qq-group-openid.json'), 'utf8'));
