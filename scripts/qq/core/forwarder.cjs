@@ -681,7 +681,10 @@ async function tick() {
 }
 function start() {
   if (!secret) throw Error('QQ_BOT_APP_SECRET is required');
-  outbox.recover();
+  const recovered = outbox.recover();
+  if (recovered.skipped_duplicate_tasks) {
+    console.log(`启动检查：已合并 ${recovered.skipped_duplicate_tasks} 个仅下载签名不同的 Discord 待发任务，保留已有发送记录。`);
+  }
   const preflightUnknown = state.prepare(`SELECT task_key,part_index,source_message_id,channel_id,error
     FROM forward_attempts WHERE status='unknown' AND part_type='image'
       AND error LIKE 'Original image unavailable:%'`).all();

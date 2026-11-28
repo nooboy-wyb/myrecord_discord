@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {DatabaseSync} = require('node:sqlite');
+const {attachmentIdentityUrl} = require('./discord_content_identity.cjs');
 
 function originalAttachmentUrl(value) {
   const url = new URL(value);
@@ -52,6 +53,18 @@ function createAttachmentQueue({root,fetchImpl = globalThis.fetch,now = Date.now
       const existing = db.prepare('SELECT status FROM discord_web_attachment_files WHERE message_id=? AND source_url=?')
         .get(messageId,item.source_url);
       if (existing?.status === 'saved') continue;
+      const saved = db.prepare("SELECT * FROM discord_web_attachment_files WHERE message_id=? AND status='saved'")
+        .all(messageId).find(file => attachmentIdentityUrl(file.source_url) === attachmentIdentityUrl(item.source_url)
+          && file.local_path && fs.existsSync(file.local_path));
+      if (saved) {
+        db.prepare(`INSERT INTO discord_web_attachment_files(message_id,source_url,local_path,sha256,status,updated_at)
+          VALUES (?,?,?,?,'saved',?) ON CONFLICT(message_id,source_url) DO UPDATE SET
+          local_path=excluded.local_path,sha256=excluded.sha256,status='saved',error=NULL,updated_at=excluded.updated_at`)
+          .run(messageId,item.source_url,saved.local_path,saved.sha256,stamp);
+        db.prepare("UPDATE discord_web_attachment_jobs SET status='saved',next_attempt_at=0 WHERE message_id=? AND source_url=? AND status<>'downloading'")
+          .run(messageId,item.source_url);
+        continue;
+      }
       db.prepare(`INSERT OR IGNORE INTO discord_web_attachment_jobs
         (message_id,source_url,channel_id,source_message_id,status,next_attempt_at,updated_at)
         VALUES (?,?,?,?,'pending',?,?)`)

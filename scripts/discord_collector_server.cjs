@@ -8,6 +8,7 @@ const {saveDiagnostic} = require('./collector_diagnostics.cjs');
 const {createPageStatusReporter} = require('./collector_page_status.cjs');
 const {captureDiagnostic} = require('./collector_capture_trace.cjs');
 const {createAttachmentQueue} = require('./collector_attachment_queue.cjs');
+const {discordContentIdentity} = require('./discord_content_identity.cjs');
 
 const root = path.resolve(process.env.MUSE_DATA_DIR || path.resolve(__dirname, '..', 'data'));
 const senderPort = Number(process.env.MUSE_QQ_PORT || 8766);
@@ -75,12 +76,27 @@ function save(message) {
     const bodyKind = !message.body_raw.trim() || message.body_raw.trim().toLowerCase() === 'no text'
       ? message.attachments.length === 1 ? 'single_image' : message.attachments.length > 1 ? 'images_only' : 'missing_image'
       : message.attachments.length ? 'text_and_image' : 'text_only';
-    const digest = crypto.createHash('sha256').update(JSON.stringify([message.body_raw, message.attachments])).digest('hex');
+    if (!db.prepare('PRAGMA table_info(discord_web_messages)').all().some(column => column.name === 'content_identity')) {
+      db.exec('ALTER TABLE discord_web_messages ADD COLUMN content_identity TEXT');
+    }
+    const digest = discordContentIdentity(message);
     const now = new Date().toISOString();
     db.exec('BEGIN IMMEDIATE');
     const fields = ['channel_id','source_message_id','guild_id','channel_name','message_url','author_display','displayed_time','source_timestamp'];
-    db.prepare(`INSERT OR IGNORE INTO discord_web_messages (${fields.join(',')},captured_at,body_raw,attachments_json,payload_json,content_sha256,body_kind) VALUES (${Array(14).fill('?').join(',')})`).run(...fields.map(f => message[f] ?? null), now, message.body_raw, JSON.stringify(message.attachments), JSON.stringify(message), digest, bodyKind);
-    const row = db.prepare('SELECT id,author_display FROM discord_web_messages WHERE channel_id=? AND source_message_id=? AND content_sha256=?').get(String(message.channel_id), String(message.source_message_id), digest);
+    // Older archives used the entire signed URL as the content hash. Reuse a
+    // matching legacy row rather than creating a fourth version during rollout.
+    let row = db.prepare(`SELECT id,author_display,body_raw,attachments_json,content_identity
+      FROM discord_web_messages WHERE channel_id=? AND source_message_id=? ORDER BY id DESC`)
+      .all(String(message.channel_id),String(message.source_message_id))
+      .find(item => (item.content_identity || discordContentIdentity(item)) === digest);
+    if (!row) {
+      db.prepare(`INSERT OR IGNORE INTO discord_web_messages (${fields.join(',')},captured_at,body_raw,attachments_json,payload_json,content_sha256,body_kind,content_identity) VALUES (${Array(15).fill('?').join(',')})`).run(...fields.map(f => message[f] ?? null), now, message.body_raw, JSON.stringify(message.attachments), JSON.stringify(message), digest, bodyKind,digest);
+      row = db.prepare('SELECT id,author_display FROM discord_web_messages WHERE channel_id=? AND source_message_id=? AND content_sha256=?').get(String(message.channel_id), String(message.source_message_id), digest);
+    }
+    // Refresh usable URLs without changing the legacy task identity or original
+    // capture time. True body/attachment changes still create a new version.
+    db.prepare('UPDATE discord_web_messages SET content_identity=?,attachments_json=?,payload_json=? WHERE id=?')
+      .run(digest,JSON.stringify(message.attachments),JSON.stringify(message),row.id);
     const correctedAuthor = String(message.author_display || '').trim();
     if (correctedAuthor && !String(row.author_display || '').trim()) {
       db.prepare('INSERT INTO discord_web_author_updates(message_id,previous_author,new_author,source,updated_at) VALUES (?,?,?,?,?)')
